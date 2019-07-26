@@ -21,9 +21,10 @@ import * as stake from "codechain-stakeholder-sdk";
 import "mocha";
 
 import { Mock } from "../helper/mock";
+import { Step as TendermintStep } from "../helper/mock/tendermintMessage";
 import { validators } from "../../tendermint.dynval/constants";
 import { PromiseExpect } from "../helper/promise";
-import { setTermTestTimeout, withNodes } from "./setup";
+import { fullyConnect, setTermTestTimeout, withNodes } from "./setup";
 
 chai.use(chaiAsPromised);
 
@@ -52,12 +53,46 @@ describe("Double vote detection", function() {
         mock = new Mock("0.0.0.0", aliceNode.port, aliceNode.sdk.networkId);
     });
 
-    it("Should create ReportDoubleVote transaction if double vote is detected", async function() {
+    it("Should report if double vote for prevote is detected", async function() {
         const termWaiter = setTermTestTimeout(this, { terms: 1 });
 
         const aliceNode = nodes[0];
+        const bettyNode = nodes[1];
+
+        // Kill betty and start sending double votes for all the votes
+        await bettyNode.clean();
         await mock.establishWithoutSync();
-        mock.startDoubleVote(alice.privateKey);
+        mock.startDoubleVote(alice.privateKey, TendermintStep.Prevote);
+        await termWaiter.waitForTermPeriods(0.5, 0);
+
+        // Revive betty and check if alice is banned
+        await bettyNode.start();
+        await fullyConnect(nodes, promiseExpect);
+        await termWaiter.waitNodeUntilTerm(aliceNode, {
+            target: 2,
+            termPeriods: 1
+        });
+        const banned = await stake.getBanned(aliceNode.sdk);
+        expect(banned.map(b => b.toString())).to.include(
+            alice.platformAddress.toString()
+        );
+    });
+
+    it("Should report if double vote for precommit is detected", async function() {
+        const termWaiter = setTermTestTimeout(this, { terms: 1 });
+
+        const aliceNode = nodes[0];
+        const bettyNode = nodes[1];
+
+        // Kill betty and start sending double votes for all the votes
+        await bettyNode.clean();
+        await mock.establishWithoutSync();
+        mock.startDoubleVote(alice.privateKey, TendermintStep.Precommit);
+        await termWaiter.waitForTermPeriods(0.5, 0);
+
+        // Revive betty and check if alice is banned
+        await bettyNode.start();
+        await fullyConnect(nodes, promiseExpect);
         await termWaiter.waitNodeUntilTerm(aliceNode, {
             target: 2,
             termPeriods: 1

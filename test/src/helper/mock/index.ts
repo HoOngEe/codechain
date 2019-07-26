@@ -19,7 +19,7 @@ import * as RLP from "rlp";
 import { BlockSyncMessage, Emitter, IBodiesq, IHeadersq, MessageType, ResponseMessage } from "./blockSyncMessage";
 import { Header } from "./cHeader";
 import { P2pLayer } from "./p2pLayer";
-import { ConsensusMessage, Emitter as TendermintEmitter, StepState, TendermintMessage } from "./tendermintMessage";
+import { ConsensusMessage, Emitter as TendermintEmitter, Step as TendermintStep, StepState, TendermintMessage } from "./tendermintMessage";
 import { TransactionSyncMessage } from "./transactionSyncMessage";
 
 
@@ -379,7 +379,7 @@ export class Mock {
         return header;
     }
 
-    public startDoubleVote(priv: string) {
+    public startDoubleVote(priv: string, step: TendermintStep) {
         const pub = getPublicFromPrivate(priv);
         TendermintEmitter.on("consensusmessage", (message: ConsensusMessage) => {
             const digest = (on: ConsensusMessage["messages"][number]["on"]) =>
@@ -400,7 +400,8 @@ export class Mock {
                     r: m.signature.slice(0, 64),
                     s: m.signature.slice(64),
                 };
-                return recoverSchnorr(digest(m.on), signature) === pub;
+                const recovered = recoverSchnorr(digest(m.on), signature);
+                return recovered === pub && m.on.step.step === step;
             });
             if (original != null) {
                 const newOn: ConsensusMessage["messages"][number]["on"] = {
