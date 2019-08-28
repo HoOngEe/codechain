@@ -168,10 +168,25 @@ impl HeaderDownloader {
             );
         } else if first_header_number == pivot_header.number() {
             if pivot_header.number() != 0 {
+                ctrace!(
+                    SYNC,
+                    "Since first_header_hash({}) is different from self.pivot.hash({}) revert pivot({}) to parent({})",
+                    first_header_hash,
+                    self.pivot.hash,
+                    self.pivot.hash,
+                    pivot_header.parent_hash()
+                );
                 self.pivot = Pivot {
                     hash: pivot_header.parent_hash(),
                     total_score: self.pivot.total_score - pivot_header.score(),
                 }
+            } else {
+                ctrace!(
+                    SYNC,
+                    "Since first_header_hash({}) is different from self.pivot.hash({}) do nothing",
+                    first_header_hash,
+                    self.pivot.hash,
+                );
             }
         } else {
             cerror!(

@@ -675,6 +675,7 @@ impl Extension {
             let after_pivot_score = peer.pivot_score();
             (peer.downloaded(), before_pivot_score != after_pivot_score)
         } else {
+            ctrace!(SYNC, "Cannot receive header downloader from {}", from);
             (Vec::new(), false)
         };
         completed.sort_unstable_by_key(EncodedHeader::number);
@@ -685,22 +686,40 @@ impl Extension {
         for header in completed {
             let hash = header.hash();
             match self.client.import_header(header.clone().into_inner()) {
-                Err(BlockImportError::Import(ImportError::AlreadyInChain)) => exists.push(hash),
-                Err(BlockImportError::Import(ImportError::AlreadyQueued)) => queued.push(hash),
+                Err(BlockImportError::Import(ImportError::AlreadyInChain)) => {
+                    ctrace!(SYNC, "Header({}) is already in the chain", hash);
+                    exists.push(hash)
+                }
+                Err(BlockImportError::Import(ImportError::AlreadyQueued)) => {
+                    ctrace!(SYNC, "Header({}) is already queued", hash);
+                    queued.push(hash)
+                }
                 // FIXME: handle import errors
                 Err(err) => {
                     cwarn!(SYNC, "Cannot import header({}): {:?}", header.hash(), err);
                     break
                 }
-                _ => {}
+                _ => {
+                    ctrace!(SYNC, "Header({}) is importing", hash);
+                }
             }
         }
 
-        let request = self.header_downloaders.get_mut(from).and_then(|peer| {
-            peer.mark_as_queued(queued);
-            peer.mark_as_imported(exists);
-            peer.create_request()
-        });
+        let request = match self.header_downloaders.get_mut(from) {
+            Some(peer) => {
+                peer.mark_as_queued(queued);
+                peer.mark_as_imported(exists);
+                peer.create_request()
+            }
+            None => {
+                if !queued.is_empty() || !exists.is_empty() {
+                    cwarn!(SYNC, "Cannot remove queued or exists in header downloader");
+                    panic!();
+                }
+                None
+            }
+        };
+
         if pivot_score_changed {
             if let Some(request) = request {
                 self.send_header_request(from, request);

@@ -121,15 +121,27 @@ pub mod headers {
         }
 
         fn create(input: Self::Input, engine: &CodeChainEngine) -> Result<Self::Unverified, Error> {
+            ctrace!(SYNC, "header verify create {}", input.hash());
             // FIXME: this doesn't seem to match with full block verification
             verify_header_basic(&input)?;
             verify_header_with_engine(&input, engine)?;
+            ctrace!(SYNC, "header verify create end {}", input.hash());
             Ok(input)
         }
 
         fn verify(un: Self::Unverified, engine: &CodeChainEngine, check_seal: bool) -> Result<Self::Verified, Error> {
+            let hash = un.hash();
+            ctrace!(SYNC, "header verify {}", hash);
             if check_seal {
-                engine.verify_block_seal(&un).map(|_| un)
+                let mut ret = engine.verify_block_seal(&un).map(|_| un);
+                ctrace!(SYNC, "header verify seal end {}", hash);
+                match ret.as_mut() {
+                    Ok(_) => {}
+                    Err(err) => {
+                        ctrace!(SYNC, "header verify seal failed {} and reason: {}", hash, err);
+                    }
+                }
+                ret
             } else {
                 Ok(un)
             }
