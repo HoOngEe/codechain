@@ -52,6 +52,9 @@ pub trait ValidatorSet: Send + Sync {
     /// Returns the current number of validators.
     fn count(&self, parent: &BlockHash) -> usize;
 
+    /// Returns the voting power of the target node.
+    fn normalized_voting_power(&self, parent: &BlockHash, index: usize, total_power: u64) -> Result<u64, EngineError>;
+
     fn check_enough_votes(&self, parent: &BlockHash, votes: &BitSet) -> Result<(), EngineError>;
 
     /// Allows blockchain state access.
