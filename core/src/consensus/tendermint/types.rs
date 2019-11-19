@@ -24,7 +24,7 @@ use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
 use super::super::BitSet;
 use super::message::VoteStep;
 use crate::block::{IsBlock, SealedBlock};
-use crate::consensus::sortition::SeedInfo;
+use crate::consensus::{sortition::seed::SeedInfo, Priority};
 
 pub type Height = u64;
 pub type View = u64;
@@ -308,14 +308,31 @@ impl TwoThirdsMajority {
 
 #[derive(Debug, PartialEq)]
 pub enum Proposal {
-    ProposalReceived(BlockHash, Bytes, SchnorrSignature),
+    ProposalHighest(BlockHash, SortitionInfo, Bytes, SchnorrSignature),
     ProposalImported(BlockHash),
     None,
 }
 
 impl Proposal {
-    pub fn new_received(hash: BlockHash, block: Bytes, signature: SchnorrSignature) -> Self {
-        Proposal::ProposalReceived(hash, block, signature)
+    pub fn new_highest(
+        hash: BlockHash,
+        sortition_info: SortitionInfo,
+        block: Bytes,
+        signature: SchnorrSignature,
+    ) -> Self {
+        Proposal::ProposalHighest(hash, sortition_info, block, signature)
+    }
+
+    fn get_highest_info(&self) -> Option<&SortitionInfo> {
+        match self {
+            Proposal::ProposalHighest(_, sortition_info, ..) => Some(sortition_info),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    pub fn get_highest_priority(&self) -> Option<Priority> {
+        self.get_highest_info().map(|info| info.priority())
     }
 
     pub fn new_imported(hash: BlockHash) -> Self {
@@ -324,7 +341,7 @@ impl Proposal {
 
     pub fn block_hash(&self) -> Option<BlockHash> {
         match self {
-            Proposal::ProposalReceived(hash, ..) => Some(*hash),
+            Proposal::ProposalHighest(hash, ..) => Some(*hash),
             Proposal::ProposalImported(hash) => Some(*hash),
             Proposal::None => None,
         }
@@ -332,16 +349,9 @@ impl Proposal {
 
     pub fn imported_block_hash(&self) -> Option<BlockHash> {
         match self {
-            Proposal::ProposalReceived(..) => None,
+            Proposal::ProposalHighest(..) => None,
             Proposal::ProposalImported(hash) => Some(*hash),
             Proposal::None => None,
-        }
-    }
-
-    pub fn is_none(&self) -> bool {
-        match self {
-            Proposal::None => true,
-            _ => false,
         }
     }
 }

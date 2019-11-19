@@ -108,6 +108,11 @@ impl StepCollector {
         }
         result
     }
+
+    /// get a ConsensusMessage corresponding to a certain index.
+    fn fetch_by_idx(&self, idx: usize) -> Option<ConsensusMessage> {
+        self.voted.get(&idx).cloned()
+    }
 }
 
 impl Default for VoteCollector {
@@ -204,12 +209,12 @@ impl VoteCollector {
         }
     }
 
-    pub fn get_block_hashes(&self, round: &VoteStep) -> Vec<BlockHash> {
-        self.votes
-            .get(round)
-            .map(|c| c.block_votes.keys().cloned().filter_map(|x| x).collect())
-            .unwrap_or_else(Vec::new)
-    }
+    // pub fn get_block_hashes(&self, round: &VoteStep) -> Vec<BlockHash> {
+    //     self.votes
+    //         .get(round)
+    //         .map(|c| c.block_votes.keys().cloned().filter_map(|x| x).collect())
+    //         .unwrap_or_else(Vec::new)
+    // }
 
     pub fn has_votes_for(&self, round: &VoteStep, block_hash: BlockHash) -> bool {
         let votes = self
@@ -218,6 +223,10 @@ impl VoteCollector {
             .map(|c| c.block_votes.keys().cloned().filter_map(|x| x).collect())
             .unwrap_or_else(Vec::new);
         votes.into_iter().any(|vote_block_hash| vote_block_hash == block_hash)
+    }
+
+    pub fn fetch_by_idx(&self, round: &VoteStep, idx: usize) -> Option<ConsensusMessage> {
+        self.votes.get(round).and_then(|collector| collector.fetch_by_idx(idx))
     }
 
     pub fn get_all(&self) -> Vec<ConsensusMessage> {

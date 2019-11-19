@@ -26,6 +26,7 @@ use snap;
 pub use super::super::sortition::PriorityMessage;
 use super::super::BitSet;
 use super::{Height, Step, View};
+use crate::consensus::Priority;
 
 /// Step for the sortition round.
 /// FIXME: It has a large overlap with the previous VoteStep.
@@ -54,6 +55,15 @@ impl VoteStep {
 
     pub fn is_step(&self, height: Height, view: View, step: Step) -> bool {
         self.height == height && self.view == view && self.step == step
+    }
+}
+
+impl From<VoteStep> for SortitionRound {
+    fn from(step: VoteStep) -> Self {
+        Self {
+            height: step.height,
+            view: step.view,
+        }
     }
 }
 
@@ -106,12 +116,14 @@ pub enum TendermintMessage {
     ConsensusMessage(Vec<Bytes>),
     ProposalBlock {
         signature: SchnorrSignature,
+        priority_message: Box<PriorityMessage>,
         view: View,
         message: Bytes,
     },
     StepState {
         vote_step: VoteStep,
         proposal: Option<BlockHash>,
+        priority: Option<Priority>,
         lock_view: Option<View>,
         known_votes: BitSet,
     },
@@ -120,8 +132,7 @@ pub enum TendermintMessage {
         requested_votes: BitSet,
     },
     RequestProposal {
-        height: Height,
-        view: View,
+        round: SortitionRound,
     },
     RequestCommit {
         height: Height,
@@ -142,12 +153,14 @@ impl Encodable for TendermintMessage {
             }
             TendermintMessage::ProposalBlock {
                 signature,
+                priority_message,
                 view,
                 message,
             } => {
-                s.begin_list(4);
+                s.begin_list(5);
                 s.append(&MESSAGE_ID_PROPOSAL_BLOCK);
                 s.append(signature);
+                s.append(&**priority_message);
                 s.append(view);
 
                 let compressed = {
@@ -160,13 +173,15 @@ impl Encodable for TendermintMessage {
             TendermintMessage::StepState {
                 vote_step,
                 proposal,
+                priority,
                 lock_view,
                 known_votes,
             } => {
-                s.begin_list(5);
+                s.begin_list(6);
                 s.append(&MESSAGE_ID_STEP_STATE);
                 s.append(vote_step);
                 s.append(proposal);
+                s.append(priority);
                 s.append(lock_view);
                 s.append(known_votes);
             }
@@ -180,13 +195,11 @@ impl Encodable for TendermintMessage {
                 s.append(requested_votes);
             }
             TendermintMessage::RequestProposal {
-                height,
-                view,
+                round,
             } => {
-                s.begin_list(3);
+                s.begin_list(2);
                 s.append(&MESSAGE_ID_REQUEST_PROPOSAL);
-                s.append(height);
-                s.append(view);
+                s.append(round);
             }
             TendermintMessage::RequestCommit {
                 height,
@@ -224,15 +237,16 @@ impl Decodable for TendermintMessage {
             }
             MESSAGE_ID_PROPOSAL_BLOCK => {
                 let item_count = rlp.item_count()?;
-                if item_count != 4 {
+                if item_count != 5 {
                     return Err(DecoderError::RlpIncorrectListLen {
                         got: item_count,
-                        expected: 4,
+                        expected: 5,
                     })
                 }
                 let signature = rlp.at(1)?;
-                let view = rlp.at(2)?;
-                let compressed_message: Vec<u8> = rlp.val_at(3)?;
+                let priority_message = rlp.at(2)?;
+                let view = rlp.at(3)?;
+                let compressed_message: Vec<u8> = rlp.val_at(4)?;
                 let uncompressed_message = {
                     // TODO: Cache the Decoder object
                     let mut snappy_decoder = snap::Decoder::new();
@@ -244,25 +258,28 @@ impl Decodable for TendermintMessage {
 
                 TendermintMessage::ProposalBlock {
                     signature: signature.as_val()?,
+                    priority_message: Box::new(priority_message.as_val()?),
                     view: view.as_val()?,
                     message: uncompressed_message,
                 }
             }
             MESSAGE_ID_STEP_STATE => {
                 let item_count = rlp.item_count()?;
-                if item_count != 5 {
+                if item_count != 6 {
                     return Err(DecoderError::RlpIncorrectListLen {
                         got: item_count,
-                        expected: 5,
+                        expected: 6,
                     })
                 }
                 let vote_step = rlp.at(1)?.as_val()?;
                 let proposal = rlp.at(2)?.as_val()?;
-                let lock_view = rlp.at(3)?.as_val()?;
-                let known_votes = rlp.at(4)?.as_val()?;
+                let priority = rlp.at(3)?.as_val()?;
+                let lock_view = rlp.at(4)?.as_val()?;
+                let known_votes = rlp.at(5)?.as_val()?;
                 TendermintMessage::StepState {
                     vote_step,
                     proposal,
+                    priority,
                     lock_view,
                     known_votes,
                 }
@@ -284,17 +301,15 @@ impl Decodable for TendermintMessage {
             }
             MESSAGE_ID_REQUEST_PROPOSAL => {
                 let item_count = rlp.item_count()?;
-                if item_count != 3 {
+                if item_count != 2 {
                     return Err(DecoderError::RlpIncorrectListLen {
                         got: item_count,
-                        expected: 3,
+                        expected: 2,
                     })
                 }
-                let height = rlp.at(1)?.as_val()?;
-                let view = rlp.at(2)?.as_val()?;
+                let round = rlp.at(1)?.as_val()?;
                 TendermintMessage::RequestProposal {
-                    height,
-                    view,
+                    round,
                 }
             }
             MESSAGE_ID_REQUEST_COMMIT => {
@@ -378,17 +393,11 @@ impl ConsensusMessage {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use ccrypto::sha256;
-    use ckey::Private;
-    use parking_lot::RwLock;
     use rlp::{self, rlp_encode_and_decode_test};
-    use vrf::openssl::{CipherSuite, ECVRF};
 
-    use super::super::super::sortition::vrf_sortition::VRFSortition;
     use super::super::Step;
     use super::*;
+    use crate::consensus::sortition::{vrf_sortition::PriorityInfo, SeedInfo};
 
     #[test]
     fn step_ordering() {
@@ -411,6 +420,10 @@ mod tests {
     fn encode_and_decode_tendermint_message_2() {
         rlp_encode_and_decode_test!(TendermintMessage::ProposalBlock {
             signature: SchnorrSignature::random(),
+            priority_message: Box::new(PriorityMessage {
+                seed_info: SeedInfo::from_fields(0, vec![], vec![]),
+                priority_info: PriorityInfo::create_from_members(0xffu64.into(), 0, vec![], vec![]),
+            }),
             view: 1,
             message: vec![1u8, 2u8]
         });
@@ -423,6 +436,7 @@ mod tests {
         rlp_encode_and_decode_test!(TendermintMessage::StepState {
             vote_step: VoteStep::new(10, 123, Step::Prevote),
             proposal: Some(Default::default()),
+            priority: Some(Default::default()),
             lock_view: Some(2),
             known_votes: bit_set
         });
@@ -441,8 +455,10 @@ mod tests {
     #[test]
     fn encode_and_decode_tendermint_message_5() {
         rlp_encode_and_decode_test!(TendermintMessage::RequestProposal {
-            height: 10,
-            view: 123,
+            round: SortitionRound {
+                height: 10,
+                view: 123,
+            }
         });
     }
 
