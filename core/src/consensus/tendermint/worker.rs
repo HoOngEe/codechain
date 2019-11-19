@@ -29,13 +29,13 @@ use ctypes::util::unexpected::Mismatch;
 use ctypes::{BlockHash, BlockNumber, Header};
 use primitives::{u256_from_u128, Bytes, U256};
 use rlp::{Encodable, Rlp};
+use vrf::openssl::{CipherSuite, ECVRF};
 
 use super::super::BitSet;
 use super::backup::{backup, restore, BackupView};
 use super::message::*;
 use super::network;
 use super::params::TimeGapParams;
-use super::priority_message_collector::PriorityMessageCollector;
 use super::stake::CUSTOM_ACTION_HANDLER_ID;
 use super::types::{Height, Step, TendermintSealView, TendermintState, TwoThirdsMajority, View};
 use super::vote_collector::{DoubleVote, VoteCollector};
@@ -48,7 +48,7 @@ use crate::consensus::signer::EngineSigner;
 use crate::consensus::validator_set::{DynamicValidator, ValidatorSet};
 use crate::consensus::{
     sortition::seed::{SeedInfo, VRFSeed},
-    EngineError, Seal, VRFSortition,
+    EngineError, PriorityInfo, Seal, VRFSortition,
 };
 use crate::encoded;
 use crate::error::{BlockError, Error};
@@ -97,7 +97,6 @@ struct Worker {
     extension: EventSender<network::Event>,
     // VRF sortition scheme,
     sortition_scheme: VRFSortition,
-    priority_messages: PriorityMessageCollector,
     time_gap_params: TimeGapParams,
     timeout_token_nonce: usize,
     vote_regression_checker: VoteRegressionChecker,
@@ -143,6 +142,7 @@ pub enum Event {
     Restore(crossbeam::Sender<()>),
     ProposalBlock {
         signature: SchnorrSignature,
+        priority_info: Box<PriorityInfo>,
         view: View,
         message: Bytes,
         result: crossbeam::Sender<Option<Arc<dyn ConsensusClient>>>,
@@ -150,15 +150,14 @@ pub enum Event {
     StepState {
         token: NodeId,
         vote_step: VoteStep,
-        proposal: Option<BlockHash>,
+        proposal: Option<ProposalSummary>,
         lock_view: Option<View>,
         known_votes: Box<BitSet>,
         result: crossbeam::Sender<Bytes>,
     },
     RequestProposal {
         token: NodeId,
-        height: Height,
-        view: View,
+        round: SortitionRound,
         result: crossbeam::Sender<Bytes>,
     },
     GetAllVotesAndAuthors {
@@ -197,6 +196,11 @@ impl Worker {
             finalized_view_of_current_block: None,
             validators,
             extension,
+            sortition_scheme: VRFSortition {
+                total_power: 1000,
+                expectation: 7.0,
+                vrf_inst: ECVRF::from_suite(CipherSuite::SECP256K1_SHA256_SVDW).unwrap(),
+            },
             votes_received: MutTrigger::new(BitSet::new()),
             time_gap_params,
             timeout_token_nonce: ENGINE_TIMEOUT_TOKEN_NONCE_BASE,
@@ -317,11 +321,12 @@ impl Worker {
                             }
                             Ok(Event::ProposalBlock {
                                 signature,
+                                priority_info,
                                 view,
                                 message,
                                 result,
                             }) => {
-                                let client = inner.on_proposal_message(signature, view, message);
+                                let client = inner.on_proposal_message(signature, *priority_info, view, message);
                                 result.send(client).unwrap();
                             }
                             Ok(Event::StepState {
@@ -331,11 +336,10 @@ impl Worker {
                             }
                             Ok(Event::RequestProposal {
                                 token,
-                                height,
-                                view,
+                                round,
                                 result,
                             }) => {
-                                inner.on_request_proposal_message(&token, height, view, result);
+                                inner.on_request_proposal_message(&token, round, result);
                             }
                             Ok(Event::GetAllVotesAndAuthors {
                                 vote_step,
@@ -403,22 +407,6 @@ impl Worker {
             .and_then(|parent_header| self.fetch_vrf_seed_info(parent_header.hash()).map(|seed_info| *seed_info.seed()))
     }
 
-    /// Get the index of the proposer of a block to check the new proposer is valid.
-    fn block_proposer_idx(&self, block_hash: BlockHash) -> Option<usize> {
-        self.client().block_header(&BlockId::Hash(block_hash)).map(|header| {
-            let proposer = header.author();
-            let parent = if header.number() == 0 {
-                // Genesis block's parent is not exist
-                // FIXME: The DynamicValidator should handle the Genesis block correctly.
-                block_hash
-            } else {
-                header.parent_hash()
-            };
-
-            self.validators.get_index_by_address(&parent, &proposer).expect("The proposer must be in the validator set")
-        })
-    }
-
     /// Get previous block header of given height
     fn prev_block_header_of_height(&self, height: Height) -> Option<encoded::Header> {
         let prev_height = (height - 1) as u64;
@@ -457,24 +445,19 @@ impl Worker {
         false
     }
 
-    /// Find the designated for the given view.
-    fn view_proposer(&self, prev_block_hash: &BlockHash, view: View) -> Option<Address> {
-        self.validators.next_block_proposer(prev_block_hash, view)
-    }
-
-    fn first_proposal_at(&self, height: Height, view: View) -> Option<(SchnorrSignature, usize, Bytes)> {
+    fn highest_proposal_at(&self, sortition_round: SortitionRound) -> Option<(SchnorrSignature, PriorityInfo, Bytes)> {
         let vote_step = VoteStep {
-            height,
-            view,
+            height: sortition_round.height,
+            view: sortition_round.view,
             step: Step::Propose,
         };
 
-        let all_votes = self.votes.get_all_votes_in_round(&vote_step);
-        let proposal = all_votes.first()?;
+        let highest_priority_info = self.votes.get_highest_priority_info(sortition_round)?;
+        let proposal = self.votes.fetch_by_idx(&vote_step, highest_priority_info.signer_idx())?;
 
         let block_hash = proposal.on.block_hash.expect("Proposal message always include block hash");
         let bytes = self.client().block(&BlockId::Hash(block_hash))?.into_inner();
-        Some((proposal.signature, proposal.signer_index, bytes))
+        Some((proposal.signature, highest_priority_info, bytes))
     }
 
     fn is_proposal_received(&self, height: Height, view: View, block_hash: BlockHash) -> bool {
@@ -497,10 +480,6 @@ impl Worker {
         }
     }
 
-    fn need_proposal(&self) -> bool {
-        self.proposal.is_none() && !self.step.is_commit()
-    }
-
     fn get_all_votes_and_authors(
         &self,
         vote_step: &VoteStep,
@@ -517,30 +496,32 @@ impl Worker {
         }
     }
 
-    /// Check if address is a proposer for given view.
-    fn check_view_proposer(
-        &self,
-        parent: &BlockHash,
-        height: Height,
-        view: View,
-        address: &Address,
-    ) -> Result<(), EngineError> {
-        let proposer = self.view_proposer(parent, view).ok_or_else(|| EngineError::PrevBlockNotExist {
-            height: height as u64,
-        })?;
-        if proposer == *address {
-            Ok(())
-        } else {
-            Err(EngineError::NotProposer(Mismatch {
-                expected: proposer,
-                found: *address,
-            }))
-        }
+    fn calculate_current_seed(&mut self) -> SeedInfo {
+        let parent_seed = self.prev_vrf_seed_of_height(self.height).expect("Parent seed must exist");
+        let new_proof = self
+            .signer
+            .vrf_prove(&parent_seed.generate_next_msg(self.height, self.view), &mut self.sortition_scheme.vrf_inst)
+            .expect("Signer key was verified");
+        let new_seed = self.sortition_scheme.vrf_inst.proof_to_hash(&new_proof).expect("Correctly generated proof");
+        SeedInfo::new(self.signer_index().expect("The signer is a validator"), new_seed, new_proof)
     }
 
-    /// Check if current signer is the current proposer.
-    fn is_signer_proposer(&self, bh: &BlockHash) -> bool {
-        self.view_proposer(bh, self.view).map_or(false, |proposer| self.signer.is_address(&proposer))
+    /// Check if current signer is eligible to be a proposer
+    fn is_signer_highest(&mut self, parent_hash: &BlockHash) -> Option<PriorityInfo> {
+        self.votes.get_highest_priority_info(self.current_sortition_round()).filter(|priority_info| {
+            self.validators.get(parent_hash, priority_info.signer_idx())
+                == *self.signer.public().expect("Engine signer must be set")
+        })
+    }
+
+    fn signer_priority_info(&mut self, parent_block_hash: BlockHash) -> Option<PriorityInfo> {
+        let parent_seed =
+            self.prev_vrf_seed_of_height(self.height).expect("Next height propose step has previous height seed");
+        let signer_idx = self.signer_index()?;
+        let voting_power = self.get_voting_power(self.height - 1, &parent_block_hash, signer_idx);
+        self.sortition_scheme
+            .create_highest_priority_info(&parent_seed.round_msg(self.view), &self.signer, signer_idx, voting_power)
+            .ok()?
     }
 
     fn is_step(&self, message: &ConsensusMessage) -> bool {
@@ -589,14 +570,14 @@ impl Worker {
     fn broadcast_state(
         &self,
         vote_step: VoteStep,
-        proposal: Option<BlockHash>,
+        proposal: Option<ProposalSummary>,
         lock_view: Option<View>,
         votes: &BitSet,
     ) {
         self.extension
             .send(network::Event::BroadcastState {
                 vote_step,
-                proposal,
+                proposal: Box::new(proposal),
                 lock_view,
                 votes: *votes,
             })
@@ -612,11 +593,10 @@ impl Worker {
             .unwrap();
     }
 
-    fn request_proposal_to_any(&self, height: Height, view: View) {
+    fn request_proposal_to_any(&self, round: SortitionRound) {
         self.extension
             .send(network::Event::RequestProposalToAny {
-                height,
-                view,
+                round,
             })
             .unwrap();
     }
@@ -712,32 +692,32 @@ impl Worker {
         match state.to_step() {
             Step::Propose => {
                 cinfo!(ENGINE, "move_to_step: Propose.");
-                // If there are multiple proposals, use the first proposal.
-                if let Some(hash) = self.votes.get_block_hashes(&vote_step).first() {
-                    if self.client().block(&BlockId::Hash(*hash)).is_none() {
+                // If there are multiple proposals, use the highest proposal.
+                if let Some(hash) = self.votes.get_highest_proposal_hash(vote_step.into()) {
+                    if self.client().block(&BlockId::Hash(hash)).is_none() {
                         cwarn!(ENGINE, "Proposal is received but not imported");
                         // Proposal is received but is not verified yet.
                         // Wait for verification.
-                        return
                     }
                 }
                 let parent_block_hash = self.prev_block_hash();
-                if !self.is_signer_proposer(&parent_block_hash) {
-                    self.request_proposal_to_any(vote_step.height, vote_step.view);
-                    return
-                }
-                if let TwoThirdsMajority::Lock(lock_view, locked_block_hash) = self.last_two_thirds_majority {
-                    cinfo!(ENGINE, "I am a proposer, I'll re-propose a locked block");
-                    match self.locked_proposal_block(lock_view, locked_block_hash) {
-                        Ok(block) => self.repropose_block(block),
-                        Err(error_msg) => cwarn!(ENGINE, "{}", error_msg),
+                if let Some(priority_info) = self.signer_priority_info(parent_block_hash) {
+                    if let TwoThirdsMajority::Lock(lock_view, locked_block_hash) = self.last_two_thirds_majority {
+                        cinfo!(ENGINE, "I am eligible to be a proposer, I'll re-propose a locked block");
+                        match self.locked_proposal_block(lock_view, locked_block_hash) {
+                            Ok(block) => self.repropose_block(priority_info, block),
+                            Err(error_msg) => cwarn!(ENGINE, "{}", error_msg),
+                        }
+                    } else {
+                        cinfo!(ENGINE, "I am eligible to be a proposer, I'll create a block");
+                        self.votes.collect_priority(self.current_sortition_round(), priority_info);
+                        self.update_sealing(parent_block_hash);
+                        self.step = TendermintState::ProposeWaitBlockGeneration {
+                            parent_hash: parent_block_hash,
+                        };
                     }
                 } else {
-                    cinfo!(ENGINE, "I am a proposer, I'll create a block");
-                    self.update_sealing(parent_block_hash);
-                    self.step = TendermintState::ProposeWaitBlockGeneration {
-                        parent_hash: parent_block_hash,
-                    };
+                    self.request_proposal_to_any(vote_step.into());
                 }
             }
             Step::Prevote => {
@@ -859,7 +839,7 @@ impl Worker {
         let received_locked_block = self.votes.has_votes_for(&vote_step, locked_proposal_hash);
 
         if !received_locked_block {
-            self.request_proposal_to_any(self.height, locked_view);
+            self.request_proposal_to_any(vote_step.into());
             return Err(format!("Have a lock on {}-{}, but do not received a locked proposal", self.height, locked_view))
         }
 
@@ -999,15 +979,15 @@ impl Worker {
         if proposal_is_for_current {
             let current_step = self.step.clone();
             match current_step {
-                TendermintState::Propose => {
-                    self.move_to_step(TendermintState::Prevote, false);
-                }
                 TendermintState::ProposeWaitImported {
                     block,
                 } => {
                     cinfo!(ENGINE, "Submitting proposal block {}", block.header().hash());
-                    self.move_to_step(TendermintState::Prevote, false);
-                    self.broadcast_proposal_block(self.view, encoded::Block::new(block.rlp_bytes()));
+                    self.broadcast_proposal_block(
+                        self.view,
+                        self.votes.get_highest_priority_info(self.current_sortition_round()).unwrap(),
+                        encoded::Block::new(block.rlp_bytes()),
+                    );
                 }
                 _ => {}
             };
@@ -1063,38 +1043,37 @@ impl Worker {
         SEAL_FIELDS
     }
 
-    fn generate_seal(&self, height: Height, parent_hash: BlockHash) -> Seal {
+    fn generate_seal(&mut self, height: Height, parent_hash: BlockHash) -> Seal {
         // Block is received from other nodes while creating a block
         if height < self.height {
             return Seal::None
         }
 
-        // We don't know at which view the node starts generating a block.
-        // If this node's signer is not proposer at the current view, return none.
-        if !self.is_signer_proposer(&parent_hash) {
+        if self.is_signer_highest(&parent_hash).is_some() {
+            assert_eq!(height, self.height);
+
+            let view = self.view;
+            let current_seed = self.calculate_current_seed();
+
+            let last_block_view = &self.finalized_view_of_previous_block;
+            assert_eq!(self.prev_block_hash(), parent_hash);
+
+            let (precommits, precommit_indices) = self.votes.round_signatures_and_indices(
+                &VoteStep::new(height - 1, *last_block_view, Step::Precommit),
+                &parent_hash,
+            );
+            ctrace!(ENGINE, "Collected seal: {:?}({:?})", precommits, precommit_indices);
+            let precommit_bitset = BitSet::new_with_indices(&precommit_indices);
+            Seal::Tendermint {
+                prev_view: *last_block_view,
+                cur_view: view,
+                precommits,
+                precommit_bitset,
+                vrf_seed_info: Box::new(current_seed),
+            }
+        } else {
             cwarn!(ENGINE, "Seal request for an old view");
-            return Seal::None
-        }
-
-        assert_eq!(height, self.height);
-
-        let view = self.view;
-
-        let last_block_view = &self.finalized_view_of_previous_block;
-        assert_eq!(self.prev_block_hash(), parent_hash);
-
-        let (precommits, precommit_indices) = self
-            .votes
-            .round_signatures_and_indices(&VoteStep::new(height - 1, *last_block_view, Step::Precommit), &parent_hash);
-        ctrace!(ENGINE, "Collected seal: {:?}({:?})", precommits, precommit_indices);
-        let precommit_bitset = BitSet::new_with_indices(&precommit_indices);
-        Seal::Tendermint {
-            prev_view: *last_block_view,
-            cur_view: view,
-            precommits,
-            precommit_bitset,
-            vrf_seed: self.prev_vrf_seed(),
-            vrf_seed_proof: vec![],
+            Seal::None
         }
     }
 
@@ -1205,7 +1184,6 @@ impl Worker {
         if !self.is_authority(header.parent_hash(), proposer) {
             return Err(EngineError::BlockNotAuthorized(*proposer).into())
         }
-        self.check_view_proposer(header.parent_hash(), header.number(), author_view, &proposer)?;
         let seal_view = TendermintSealView::new(header.seal());
         let bitset_count = seal_view.bitset()?.count();
         let precommits_count = seal_view.precommits().item_count()?;
@@ -1476,28 +1454,26 @@ impl Worker {
         !self.has_enough_precommit_votes(block_hash)
     }
 
-    fn repropose_block(&mut self, block: encoded::Block) {
+    fn repropose_block(&mut self, priority_info: PriorityInfo, block: encoded::Block) {
         let header = block.decode_header();
-        self.vote_on_header_for_proposal(&header).expect("I am proposer");
+        self.vote_on_header_for_proposal(&header).expect("I am eligible to be a proposer");
 
         debug_assert!(self.client().block(&BlockId::Hash(header.hash())).is_some());
 
         self.broadcast_proposal_block(self.view, priority_info, block);
     }
 
-    fn broadcast_proposal_block(&self, view: View, block: encoded::Block) {
+    fn broadcast_proposal_block(&self, view: View, priority_info: PriorityInfo, block: encoded::Block) {
         let header = block.decode_header();
         let hash = header.hash();
-        let parent_hash = header.parent_hash();
         let vote_step = VoteStep::new(header.number() as Height, view, Step::Propose);
         cdebug!(ENGINE, "Send proposal {:?}", vote_step);
-
-        assert!(self.is_signer_proposer(&parent_hash));
 
         let signature = self.votes.round_signature(&vote_step, &hash).expect("Proposal vote is generated before");
         self.extension
             .send(network::Event::BroadcastProposalBlock {
                 signature,
+                priority_info: Box::new(priority_info),
                 view,
                 message: block.into_inner(),
             })
@@ -1538,10 +1514,7 @@ impl Worker {
 
     fn vote_on_header_for_proposal(&mut self, header: &Header) -> Result<ConsensusMessage, Error> {
         assert!(header.number() == self.height);
-
-        let parent_hash = header.parent_hash();
-        let prev_proposer_idx = self.block_proposer_idx(*parent_hash).expect("Prev block must exists");
-        let signer_index = self.validators.proposer_index(*parent_hash, prev_proposer_idx, self.view as usize);
+        let signer_index = self.signer_index().expect("I am a validator");
 
         let on = VoteOn {
             step: VoteStep::new(self.height, self.view, Step::Propose),
@@ -1566,12 +1539,9 @@ impl Worker {
         &self,
         header: &Header,
         proposed_view: View,
+        signer_index: usize,
         signature: SchnorrSignature,
     ) -> Option<ConsensusMessage> {
-        let prev_proposer_idx = self.block_proposer_idx(*header.parent_hash())?;
-        let signer_index =
-            self.validators.proposer_index(*header.parent_hash(), prev_proposer_idx, proposed_view as usize);
-
         let on = VoteOn {
             step: VoteStep::new(header.number(), proposed_view, Step::Propose),
             block_hash: Some(header.hash()),
@@ -1653,12 +1623,14 @@ impl Worker {
     fn send_proposal_block(
         &self,
         signature: SchnorrSignature,
+        priority_info: PriorityInfo,
         view: View,
         message: Bytes,
         result: crossbeam::Sender<Bytes>,
     ) {
         let message = TendermintMessage::ProposalBlock {
             signature,
+            priority_info: Box::new(priority_info),
             message,
             view,
         }
@@ -1682,11 +1654,10 @@ impl Worker {
         result.send(message).unwrap();
     }
 
-    fn send_request_proposal(&self, token: &NodeId, height: Height, view: View, result: &crossbeam::Sender<Bytes>) {
-        ctrace!(ENGINE, "Request proposal {} {} to {:?}", height, view, token);
+    fn send_request_proposal(&self, token: &NodeId, round: SortitionRound, result: &crossbeam::Sender<Bytes>) {
+        ctrace!(ENGINE, "Request proposal {:?} to {:?}", round, token);
         let message = TendermintMessage::RequestProposal {
-            height,
-            view,
+            round,
         }
         .rlp_bytes();
         result.send(message).unwrap();
@@ -1710,9 +1681,24 @@ impl Worker {
         result.send(message.rlp_bytes()).unwrap();
     }
 
+    fn get_voting_power(&self, height: u64, block_hash: &BlockHash, signer_idx: usize) -> u64 {
+        self.validators
+            .normalized_voting_power(height, block_hash, signer_idx, self.sortition_scheme.total_power)
+            .unwrap()
+    }
+
+    #[inline]
+    fn current_sortition_round(&self) -> SortitionRound {
+        SortitionRound {
+            height: self.height,
+            view: self.view,
+        }
+    }
+
     fn on_proposal_message(
         &mut self,
         signature: SchnorrSignature,
+        priority_info: PriorityInfo,
         proposed_view: View,
         bytes: Bytes,
     ) -> Option<Arc<dyn ConsensusClient>> {
@@ -1739,13 +1725,14 @@ impl Worker {
                     return None
                 }
             }
-            let message = match self.recover_proposal_vote(&header_view, proposed_view, signature) {
-                Some(vote) => vote,
-                None => {
-                    cwarn!(ENGINE, "Prev block proposer does not exist for height {}", number);
-                    return None
-                }
-            };
+            let message =
+                match self.recover_proposal_vote(&header_view, proposed_view, priority_info.signer_idx(), signature) {
+                    Some(vote) => vote,
+                    None => {
+                        cwarn!(ENGINE, "Prev block proposer does not exist for height {}", number);
+                        return None
+                    }
+                };
 
             // If the proposal's height is current height + 1 and the proposal has valid precommits,
             // we should import it and increase height
@@ -1759,7 +1746,7 @@ impl Worker {
                 return None
             }
 
-            let signer_public = self.validators.get(&parent_hash, message.signer_index);
+            let signer_public = self.validators.get(&parent_hash, priority_info.signer_idx());
             match message.verify(&signer_public) {
                 Ok(false) => {
                     cwarn!(ENGINE, "Proposal verification failed: signer is different");
@@ -1772,10 +1759,38 @@ impl Worker {
                 _ => {}
             }
 
+            // priority verification block
+            {
+                let parent_seed = self.prev_vrf_seed_of_height(number)?;
+                let signer_idx = priority_info.signer_idx();
+
+                let voting_power = self.get_voting_power(number - 1, &parent_hash, signer_idx);
+                match priority_info.verify(
+                    &parent_seed.round_msg(proposed_view),
+                    &signer_public,
+                    voting_power,
+                    &mut self.sortition_scheme,
+                ) {
+                    Ok(true) => {}
+                    _ => {
+                        cwarn!(ENGINE, "Priority message verification failed");
+                        return None
+                    }
+                }
+            }
+
             if self.votes.is_old_or_known(&message) {
                 cdebug!(ENGINE, "Proposal is already known");
                 return None
             }
+
+            self.votes.collect_priority(
+                SortitionRound {
+                    height: number,
+                    view: proposed_view,
+                },
+                priority_info.clone(),
+            );
 
             if number == self.height as u64 && proposed_view == self.view {
                 // The proposer re-proposed its locked proposal.
@@ -1824,7 +1839,7 @@ impl Worker {
         &self,
         token: &NodeId,
         peer_vote_step: VoteStep,
-        peer_proposal: Option<BlockHash>,
+        peer_proposal: Option<ProposalSummary>,
         peer_lock_view: Option<View>,
         peer_known_votes: BitSet,
         result: crossbeam::Sender<Bytes>,
@@ -1939,11 +1954,10 @@ impl Worker {
     fn on_request_proposal_message(
         &self,
         token: &NodeId,
-        request_height: Height,
-        request_view: View,
+        requested_round: SortitionRound,
         result: crossbeam::Sender<Bytes>,
     ) {
-        if request_height > self.height {
+        if requested_round > self.current_sortition_round() {
             return
         }
 
