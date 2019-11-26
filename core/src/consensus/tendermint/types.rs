@@ -24,7 +24,7 @@ use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
 use super::super::BitSet;
 use super::message::VoteStep;
 use crate::block::{IsBlock, SealedBlock};
-use crate::consensus::{sortition::seed::SeedInfo, Priority};
+use crate::consensus::{sortition::seed::SeedInfo, sortition::PriorityMessage, Priority};
 
 pub type Height = u64;
 pub type View = u64;
@@ -287,7 +287,7 @@ impl TwoThirdsMajority {
 
 #[derive(Debug, PartialEq)]
 pub enum Proposal {
-    ProposalHighest(BlockHash, SortitionInfo, Bytes, SchnorrSignature),
+    ProposalHighest(BlockHash, PriorityMessage, Bytes, SchnorrSignature),
     ProposalImported(BlockHash),
     None,
 }
@@ -295,16 +295,16 @@ pub enum Proposal {
 impl Proposal {
     pub fn new_highest(
         hash: BlockHash,
-        sortition_info: SortitionInfo,
+        priority_message: PriorityMessage,
         block: Bytes,
         signature: SchnorrSignature,
     ) -> Self {
-        Proposal::ProposalHighest(hash, sortition_info, block, signature)
+        Proposal::ProposalHighest(hash, priority_message, block, signature)
     }
 
-    fn get_highest_info(&self) -> Option<&SortitionInfo> {
+    fn get_highest_info(&self) -> Option<&PriorityMessage> {
         match self {
-            Proposal::ProposalHighest(_, sortition_info, ..) => Some(sortition_info),
+            Proposal::ProposalHighest(_, priority_message, ..) => Some(priority_message),
             _ => None,
         }
     }

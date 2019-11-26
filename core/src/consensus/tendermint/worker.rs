@@ -49,7 +49,7 @@ use crate::consensus::signer::EngineSigner;
 use crate::consensus::validator_set::{DynamicValidator, ValidatorSet};
 use crate::consensus::{
     sortition::seed::{SeedInfo, VRFSeed},
-    EngineError, Priority, Seal, VRFSortition,
+    EngineError, Priority, PriorityMessage, Seal, VRFSortition,
 };
 use crate::encoded;
 use crate::error::{BlockError, Error};
@@ -531,11 +531,6 @@ impl Worker {
             .sortition_scheme
             .create_highest_priority_info(H256::from_slice(&new_seed).into(), &self.signer, voting_power)
             .ok()?;
-
-        let message = PriorityMessage {
-            seed_info: SeedInfo::from_fields(signer_idx, new_proof, new_seed),
-            priority_info: priority_info?,
-        };
 
         Some(PriorityMessage {
             seed_info: SeedInfo::from_fields(signer_idx, new_seed, new_proof),
@@ -1866,7 +1861,8 @@ impl Worker {
                     self.proposal = Proposal::new_imported(header_view.hash());
                 } else {
                     // The received proposal is higher than the current highest proposal.
-                    self.proposal = Proposal::new_highest(header_view.hash(), sortition_info, bytes.clone(), signature);
+                    self.proposal =
+                        Proposal::new_highest(header_view.hash(), priority_message, bytes.clone(), signature);
                 }
                 self.broadcast_state(
                     VoteStep::new(self.height, self.view, self.step.to_step()),

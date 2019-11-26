@@ -32,6 +32,7 @@ pub use self::null_engine::NullEngine;
 pub use self::simple_poa::SimplePoA;
 pub use self::solo::Solo;
 pub use self::sortition::vrf_sortition::{Priority, PriorityInfo, VRFSortition};
+pub use self::sortition::PriorityMessage;
 pub use self::tendermint::{
     ConsensusMessage, Height, Step, Tendermint, TendermintParams, TimeGapParams, View, VoteOn, VoteStep,
 };
