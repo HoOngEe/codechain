@@ -609,10 +609,11 @@ impl Worker {
             .unwrap();
     }
 
-    fn request_proposal_to_any(&self, round: SortitionRound) {
+    fn request_proposal_to_superiors(&self, round: SortitionRound, current_highest: Option<Priority>) {
         self.extension
-            .send(network::Event::RequestProposalToAny {
+            .send(network::Event::RequestProposalToSuperiors {
                 round,
+                current_highest,
             })
             .unwrap();
     }
@@ -672,6 +673,10 @@ impl Worker {
         self.votes_received = MutTrigger::new(BitSet::new());
         self.finalized_view_of_previous_block = finalized_view_of_previous_height;
         self.finalized_view_of_current_block = None;
+    }
+
+    fn get_round_highest_priority(&self, round: &SortitionRound) -> Option<Priority> {
+        self.priority_messages.get_highest_priority_message(round).map(|message| message.priority())
     }
 
     #[allow(clippy::cognitive_complexity)]
@@ -745,7 +750,10 @@ impl Worker {
                         };
                     }
                 } else {
-                    self.request_proposal_to_any(vote_step.into());
+                    let sortition_round = vote_step.into();
+                    let round_highest_priority = self.get_round_highest_priority(&sortition_round);
+                    cinfo!(ENGINE, "I am not eligible to be a proposer, I'll request a proposal");
+                    self.request_proposal_to_superiors(sortition_round, round_highest_priority);
                 }
             }
             Step::Prevote => {
@@ -852,7 +860,9 @@ impl Worker {
         let received_locked_block = self.votes.has_votes_for(&vote_step, locked_proposal_hash);
 
         if !received_locked_block {
-            self.request_proposal_to_any(vote_step.into());
+            let sortition_round = vote_step.into();
+            let round_highest_priority = self.get_round_highest_priority(&sortition_round);
+            self.request_proposal_to_superiors(sortition_round, round_highest_priority);
             return Err(format!("Have a lock on {}-{}, but do not received a locked proposal", self.height, locked_view))
         }
 

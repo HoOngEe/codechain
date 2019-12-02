@@ -179,6 +179,7 @@ impl Encodable for Step {
 
 pub struct PeerState {
     pub vote_step: VoteStep,
+    pub priority: Option<Priority>,
     pub proposal: Option<BlockHash>,
     pub messages: BitSet,
 }
@@ -187,6 +188,7 @@ impl PeerState {
     pub fn new() -> Self {
         PeerState {
             vote_step: VoteStep::new(0, 0, Step::Propose),
+            priority: None,
             proposal: None,
             messages: BitSet::new(),
         }

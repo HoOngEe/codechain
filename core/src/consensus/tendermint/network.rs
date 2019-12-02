@@ -73,6 +73,7 @@ impl TendermintExtension {
         &mut self,
         token: &NodeId,
         vote_step: VoteStep,
+        priority: Option<Priority>,
         proposal: Option<BlockHash>,
         messages: BitSet,
     ) {
@@ -82,6 +83,7 @@ impl TendermintExtension {
             None => return,
         };
         peer_state.vote_step = vote_step;
+        peer_state.priority = priority;
         peer_state.proposal = proposal;
         peer_state.messages = messages;
     }
@@ -157,24 +159,22 @@ impl TendermintExtension {
         }
     }
 
-    fn request_proposal_to_any(&self, round: SortitionRound) {
-        for (token, peer) in &self.peers {
-            let is_future_height_and_view = {
-                let higher_height = peer.vote_step.height > round.height;
-                let same_height_and_higher_view =
-                    peer.vote_step.height == round.height && peer.vote_step.view > round.view;
-                higher_height || same_height_and_higher_view
-            };
+    fn request_proposal_to_superiors(&self, round: SortitionRound, my_highest: Option<Priority>) {
+        if let Some(peer_highest_priority) = self.peers.iter().map(|(_id, peer)| peer.priority).max() {
+            let highest_priority_peers = self.peers.iter().filter(|(_id, peer)| peer.priority == peer_highest_priority);
 
-            if is_future_height_and_view {
-                self.request_proposal(token, round);
-                continue
-            }
+            for (token, peer) in highest_priority_peers {
+                let is_future_height_and_view =
+                    (peer.vote_step.height, peer.vote_step.view) > (round.height, round.view);
+                let is_same_height_and_view =
+                    (peer.vote_step.height, peer.vote_step.view) == (round.height, round.view);
 
-            let is_same_height_and_view = peer.vote_step.height == round.height && peer.vote_step.view == round.view;
-
-            if is_same_height_and_view && peer.proposal.is_some() {
-                self.request_proposal(token, round);
+                if is_future_height_and_view {
+                    self.request_proposal(token, round);
+                    continue
+                } else if is_same_height_and_view && peer.priority > my_highest {
+                    self.request_proposal(token, round);
+                }
             }
         }
     }
@@ -310,7 +310,7 @@ impl NetworkExtension<Event> for TendermintExtension {
                     lock_view,
                     known_votes,
                 );
-                self.update_peer_state(token, vote_step, proposal, known_votes);
+                self.update_peer_state(token, vote_step, priority, proposal, known_votes);
                 let (result, receiver) = crossbeam::unbounded();
                 self.inner
                     .send(worker::Event::StepState {
@@ -431,10 +431,11 @@ impl NetworkExtension<Event> for TendermintExtension {
             } => {
                 self.request_messages_to_all(vote_step, requested_votes);
             }
-            Event::RequestProposalToAny {
+            Event::RequestProposalToSuperiors {
                 round,
+                current_highest,
             } => {
-                self.request_proposal_to_any(round);
+                self.request_proposal_to_superiors(round, current_highest);
             }
             Event::SetTimerStep {
                 step,
@@ -468,8 +469,9 @@ pub enum Event {
         vote_step: VoteStep,
         requested_votes: BitSet,
     },
-    RequestProposalToAny {
+    RequestProposalToSuperiors {
         round: SortitionRound,
+        current_highest: Option<Priority>,
     },
     SetTimerStep {
         step: Step,
