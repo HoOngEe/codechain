@@ -24,20 +24,75 @@ use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
 use super::super::BitSet;
 use super::message::{ProposalSummary, VoteStep};
 use crate::block::{IsBlock, SealedBlock};
-use crate::consensus::{sortition::seed::SeedInfo, Priority};
+use crate::consensus::{sortition::seed::SeedInfo, Priority, PriorityInfo};
 
 pub type Height = u64;
 pub type View = u64;
 
 #[derive(Clone)]
+pub struct ProposeInner {
+    wait_block_generation: Option<(PriorityInfo, BlockHash)>,
+    wait_imported: Vec<(PriorityInfo, SealedBlock)>,
+    is_timed_out: bool,
+}
+
+impl ProposeInner {
+    fn is_propose_step_ended(&self) -> bool {
+        self.wait_block_generation.is_none() && self.wait_imported.is_empty() && self.is_timed_out
+    }
+
+    fn mark_timed_out_if_propose_step(&mut self) {
+        self.is_timed_out = true;
+    }
+
+    pub fn generation_completed(&mut self) -> Option<(PriorityInfo, BlockHash)> {
+        self.wait_block_generation.take()
+    }
+
+    pub fn generation_halted(&mut self) {
+        self.wait_block_generation = None;
+    }
+
+    fn import_completed(&mut self, target_block_hash: BlockHash) -> Option<(PriorityInfo, SealedBlock)> {
+        let position = self
+            .wait_imported
+            .iter()
+            .position(|(_, sealed_block)| sealed_block.header().hash() == target_block_hash)?;
+        Some(self.wait_imported.remove(position))
+    }
+
+    fn wait_block_generation(&mut self, my_priority_info: PriorityInfo, parent_hash: BlockHash) {
+        self.wait_block_generation = Some((my_priority_info, parent_hash));
+    }
+
+    fn wait_imported(&mut self, target_priority_info: PriorityInfo, target_block: SealedBlock) {
+        self.wait_imported.insert(0, (target_priority_info, target_block));
+    }
+
+    pub fn get_wait_imported(&self) -> &Vec<(PriorityInfo, SealedBlock)> {
+        &self.wait_imported
+    }
+
+    pub fn get_wait_block_generation(&self) -> &Option<(PriorityInfo, BlockHash)> {
+        &self.wait_block_generation
+    }
+}
+
+impl fmt::Debug for ProposeInner {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "waiting block generation {:?} and waiting block imports {:?}",
+            self.wait_block_generation,
+            self.wait_imported.iter().map(|(_, sealed)| sealed.header().hash()).collect::<Vec<_>>()
+        )
+    }
+}
+
+#[derive(Clone)]
 pub enum TendermintState {
-    Propose,
-    ProposeWaitBlockGeneration {
-        parent_hash: BlockHash,
-    },
-    ProposeWaitImported {
-        block: Box<SealedBlock>,
-    },
+    // wait block generation
+    Propose(Box<ProposeInner>),
     Prevote,
     Precommit,
     Commit {
@@ -51,13 +106,65 @@ pub enum TendermintState {
 }
 
 impl TendermintState {
+    pub fn new_propose_step() -> Self {
+        TendermintState::Propose(Box::new(ProposeInner {
+            wait_block_generation: None,
+            wait_imported: Vec::new(),
+            is_timed_out: false,
+        }))
+    }
+
+    pub fn is_propose_step_ended(&self) -> bool {
+        if let Self::Propose(inner) = self {
+            inner.is_propose_step_ended()
+        } else {
+            false
+        }
+    }
+
+    pub fn mark_timed_out_if_propose_step(&mut self) {
+        if let Self::Propose(inner) = self {
+            inner.mark_timed_out_if_propose_step();
+        }
+    }
+
+    pub fn generation_completed(&mut self) -> Option<(PriorityInfo, BlockHash)> {
+        if let Self::Propose(inner) = self {
+            inner.generation_completed()
+        } else {
+            None
+        }
+    }
+
+    pub fn generation_halted(&mut self) {
+        if let Self::Propose(inner) = self {
+            inner.generation_halted()
+        }
+    }
+
+    pub fn import_completed(&mut self, target_block_hash: BlockHash) -> Option<(PriorityInfo, SealedBlock)> {
+        if let Self::Propose(inner) = self {
+            inner.import_completed(target_block_hash)
+        } else {
+            None
+        }
+    }
+
+    pub fn wait_block_generation(&mut self, my_priority_info: PriorityInfo, parent_hash: BlockHash) {
+        if let Self::Propose(inner) = self {
+            inner.wait_block_generation(my_priority_info, parent_hash);
+        }
+    }
+
+    pub fn wait_imported(&mut self, target_priority_info: PriorityInfo, target_block: SealedBlock) {
+        if let Self::Propose(inner) = self {
+            inner.wait_imported(target_priority_info, target_block)
+        }
+    }
+
     pub fn to_step(&self) -> Step {
         match self {
-            TendermintState::Propose => Step::Propose,
-            TendermintState::ProposeWaitBlockGeneration {
-                ..
-            } => Step::Propose,
-            TendermintState::ProposeWaitImported {
+            TendermintState::Propose {
                 ..
             } => Step::Propose,
             TendermintState::Prevote => Step::Prevote,
@@ -102,11 +209,7 @@ impl TendermintState {
                 block_hash,
                 view,
             } => Some((*view, *block_hash)),
-            TendermintState::Propose => None,
-            TendermintState::ProposeWaitBlockGeneration {
-                ..
-            } => None,
-            TendermintState::ProposeWaitImported {
+            TendermintState::Propose {
                 ..
             } => None,
             TendermintState::Prevote => None,
@@ -118,13 +221,7 @@ impl TendermintState {
 impl fmt::Debug for TendermintState {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            TendermintState::Propose => write!(f, "TendermintState::Propose"),
-            TendermintState::ProposeWaitBlockGeneration {
-                parent_hash,
-            } => write!(f, "TendermintState::ProposeWaitBlockGeneration({})", parent_hash),
-            TendermintState::ProposeWaitImported {
-                block,
-            } => write!(f, "TendermintState::ProposeWaitImported({})", block.header().hash()),
+            TendermintState::Propose(inner) => write!(f, "TenderminState::Propose, {:?}", inner),
             TendermintState::Prevote => write!(f, "TendermintState::Prevote"),
             TendermintState::Precommit => write!(f, "TendermintState::Precommit"),
             TendermintState::Commit {

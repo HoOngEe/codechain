@@ -193,7 +193,7 @@ impl Worker {
             client,
             height: 1,
             view: 0,
-            step: TendermintState::Propose,
+            step: TendermintState::new_propose_step(),
             votes: Default::default(),
             signer: Default::default(),
             last_two_thirds_majority: TwoThirdsMajority::Empty,
@@ -723,11 +723,9 @@ impl Worker {
                         }
                     } else {
                         cinfo!(ENGINE, "I am eligible to be a proposer, I'll create a block");
-                        self.votes.collect_priority(self.current_sortition_round(), priority_info);
+                        self.votes.collect_priority(self.current_sortition_round(), priority_info.clone());
                         self.update_sealing(parent_block_hash);
-                        self.step = TendermintState::ProposeWaitBlockGeneration {
-                            parent_hash: parent_block_hash,
-                        };
+                        self.step.wait_block_generation(priority_info, parent_block_hash);
                     }
                 } else {
                     let sortition_round = vote_step.into();
@@ -921,7 +919,7 @@ impl Worker {
         {
             if self.can_move_from_commit_to_propose() {
                 self.move_to_the_next_height();
-                self.move_to_step(TendermintState::Propose, is_restoring);
+                self.move_to_step(TendermintState::new_propose_step(), is_restoring);
                 return
             }
 
@@ -943,7 +941,7 @@ impl Worker {
             let next_step = match self.step {
                 TendermintState::Precommit if message.on.block_hash.is_none() && has_enough_aligned_votes => {
                     self.increment_view(1);
-                    Some(TendermintState::Propose)
+                    Some(TendermintState::new_propose_step())
                 }
                 // Avoid counting votes twice.
                 TendermintState::Prevote if lock_change => Some(TendermintState::Precommit),
@@ -991,24 +989,23 @@ impl Worker {
             step: Step::Propose,
         });
 
+        let proposal_hash = proposal.hash();
         let current_height = self.height;
         let current_vote_step = VoteStep::new(self.height, self.view, self.step.to_step());
-        let proposal_is_for_current = self.votes.has_votes_for(&current_vote_step, proposal.hash());
+        let proposal_is_for_current = self.votes.has_votes_for(&current_vote_step, proposal_hash);
         if proposal_is_for_current {
-            let current_step = self.step.clone();
-            match current_step {
-                TendermintState::ProposeWaitImported {
-                    block,
-                } => {
-                    cinfo!(ENGINE, "Submitting proposal block {}", block.header().hash());
-                    self.broadcast_proposal_block(
-                        self.view,
-                        self.votes.get_highest_priority_info(self.current_sortition_round()).unwrap(),
-                        encoded::Block::new(block.rlp_bytes()),
-                    );
+            if let Some((priority_info, imported_block)) = self.step.import_completed(proposal_hash) {
+                cinfo!(ENGINE, "Submitting proposal block {}", proposal_hash);
+                // FIXME: We don't need to propagate the generated block if we know a higher priority block
+                self.broadcast_proposal_block(
+                    self.view,
+                    priority_info,
+                    encoded::Block::new(imported_block.rlp_bytes()),
+                );
+                if self.step.is_propose_step_ended() {
+                    self.move_to_step(TendermintState::Prevote, false);
                 }
-                _ => {}
-            };
+            }
         } else if current_height < height {
             let finalized_view_of_previous_height =
                 TendermintSealView::new(proposal.seal()).parent_block_finalized_view().unwrap();
@@ -1034,7 +1031,7 @@ impl Worker {
         let backup = restore(client.get_kvdb().as_ref());
         if let Some(backup) = backup {
             let backup_step = match backup.step {
-                Step::Propose => TendermintState::Propose,
+                Step::Propose => TendermintState::new_propose_step(),
                 Step::Prevote => TendermintState::Prevote,
                 Step::Precommit => TendermintState::Precommit,
                 // If the backuped step is `Commit`, we should start at `Precommit` to update the
@@ -1064,6 +1061,7 @@ impl Worker {
     fn generate_seal(&mut self, height: Height, parent_hash: BlockHash) -> Seal {
         // Block is received from other nodes while creating a block
         if height < self.height {
+            self.step.generation_halted();
             return Seal::None
         }
 
@@ -1090,6 +1088,7 @@ impl Worker {
                 vrf_seed_info: Box::new(current_seed),
             }
         } else {
+            self.step.generation_halted();
             cwarn!(ENGINE, "Seal request for an old view");
             Seal::None
         }
@@ -1115,31 +1114,25 @@ impl Worker {
 
         let header = sealed_block.header();
 
-        if let TendermintState::ProposeWaitBlockGeneration {
-            parent_hash: expected_parent_hash,
-        } = self.step
-        {
+        if let Some((target_priority_info, expected_parent_hash)) = self.step.generation_completed() {
             let parent_hash = header.parent_hash();
             assert_eq!(
                 *parent_hash, expected_parent_hash,
                 "Generated hash({:?}) is different from expected({:?})",
                 parent_hash, expected_parent_hash
             );
+
+            debug_assert_eq!(Ok(self.view), TendermintSealView::new(header.seal()).author_view());
+
+            self.vote_on_header_for_proposal(&header).expect("I'm a proposer");
+            self.step.wait_imported(target_priority_info, sealed_block.clone());
         } else {
             ctrace!(
                 ENGINE,
                 "Proposal is generated after step is changed. Expected step is ProposeWaitBlockGeneration but current step is {:?}",
                 self.step,
             );
-            return
         }
-        debug_assert_eq!(Ok(self.view), TendermintSealView::new(header.seal()).author_view());
-
-        self.vote_on_header_for_proposal(&header).expect("I'm a proposer");
-
-        self.step = TendermintState::ProposeWaitImported {
-            block: Box::new(sealed_block.clone()),
-        };
     }
 
     fn verify_header_basic(&self, header: &Header) -> Result<(), Error> {
@@ -1282,22 +1275,18 @@ impl Worker {
             return
         }
 
-        let next_step = match self.step {
-            TendermintState::Propose => {
-                cinfo!(ENGINE, "Propose timeout.");
+        self.step.mark_timed_out_if_propose_step();
+        let next_step = match &self.step {
+            TendermintState::Propose(inner) => {
+                if let Some(wait_block_generation) = inner.get_wait_block_generation() {
+                    cwarn!(ENGINE, "Propose timed out but block {:?} is not generated yet", wait_block_generation);
+                    return
+                } else if !inner.get_wait_imported().is_empty() {
+                    cwarn!(ENGINE, "Propose timed out but still waiting for the blocks imported");
+                    return
+                }
+                cinfo!(ENGINE, "Propose timed out");
                 TendermintState::Prevote
-            }
-            TendermintState::ProposeWaitBlockGeneration {
-                ..
-            } => {
-                cwarn!(ENGINE, "Propose timed out but block is not generated yet");
-                return
-            }
-            TendermintState::ProposeWaitImported {
-                ..
-            } => {
-                cwarn!(ENGINE, "Propose timed out but still waiting for the block imported");
-                return
             }
             TendermintState::Prevote if self.has_enough_any_votes() => {
                 cinfo!(ENGINE, "Prevote timeout.");
@@ -1310,7 +1299,7 @@ impl Worker {
             TendermintState::Precommit if self.has_enough_any_votes() => {
                 cinfo!(ENGINE, "Precommit timeout.");
                 self.increment_view(1);
-                TendermintState::Propose
+                TendermintState::new_propose_step()
             }
             TendermintState::Precommit => {
                 cinfo!(ENGINE, "Precommit timeout without enough votes.");
@@ -1322,20 +1311,20 @@ impl Worker {
             } => {
                 cinfo!(ENGINE, "Commit timeout.");
 
-                let proposal_imported = self.client().block(&block_hash.into()).is_some();
+                let proposal_imported = self.client().block(&(*block_hash).into()).is_some();
                 let best_block_header = self.client().best_block_header();
 
-                if !proposal_imported || best_block_header.hash() != block_hash {
+                if !proposal_imported || best_block_header.hash() != *block_hash {
                     cwarn!(ENGINE, "Best chain is not updated yet, wait until imported");
                     self.step = TendermintState::CommitTimedout {
-                        block_hash,
-                        view,
+                        block_hash: *block_hash,
+                        view: *view,
                     };
                     return
                 }
 
                 self.move_to_the_next_height();
-                TendermintState::Propose
+                TendermintState::new_propose_step()
             }
             TendermintState::CommitTimedout {
                 ..
@@ -1608,7 +1597,7 @@ impl Worker {
                 cdebug!(ENGINE, "Committed block {} is now the best block", committed_block_hash);
                 if self.can_move_from_commit_to_propose() {
                     self.move_to_the_next_height();
-                    self.move_to_step(TendermintState::Propose, false);
+                    self.move_to_step(TendermintState::new_propose_step(), false);
                     return
                 }
             }
@@ -1640,7 +1629,7 @@ impl Worker {
                 }
             }
             if height_at_begin != self.height {
-                self.move_to_step(TendermintState::Propose, false);
+                self.move_to_step(TendermintState::new_propose_step(), false);
             }
             if let Some(last_proposal_header) = last_proposal_header {
                 self.on_imported_proposal(&last_proposal_header);
