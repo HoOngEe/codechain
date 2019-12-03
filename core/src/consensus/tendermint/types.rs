@@ -15,6 +15,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use std::fmt;
+use std::ops::{Deref, DerefMut};
 
 use ckey::SchnorrSignature;
 use ctypes::BlockHash;
@@ -287,52 +288,88 @@ impl TwoThirdsMajority {
     }
 }
 
+/// ProposalInfo stores the information for a valid proposal
 #[derive(Debug, PartialEq)]
-pub enum Proposal {
-    ProposalHighest(BlockHash, PriorityMessage, Bytes, SchnorrSignature),
-    ProposalImported(BlockHash),
-    None,
+pub struct ProposalInfo {
+    block_hash: BlockHash,
+    priority_message: PriorityMessage,
+    block: Bytes,
+    signature: SchnorrSignature,
+    is_imported: bool,
+}
+
+impl ProposalInfo {
+    pub fn priority_message(&self) -> &PriorityMessage {
+        &self.priority_message
+    }
+
+    pub fn block(&self) -> &Bytes {
+        &self.block
+    }
+
+    pub fn signature(&self) -> &SchnorrSignature {
+        &self.signature
+    }
+}
+
+/// Proposal stores ProposalInfo in order of priority
+#[derive(Debug, PartialEq)]
+pub struct Proposal(Vec<ProposalInfo>);
+
+impl Deref for Proposal {
+    type Target = Vec<ProposalInfo>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for Proposal {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
 }
 
 impl Proposal {
+    pub fn new() -> Self {
+        Proposal(Vec::new())
+    }
+
     pub fn new_highest(
-        hash: BlockHash,
+        &mut self,
+        block_hash: BlockHash,
         priority_message: PriorityMessage,
         block: Bytes,
         signature: SchnorrSignature,
-    ) -> Self {
-        Proposal::ProposalHighest(hash, priority_message, block, signature)
+    ) {
+        self.insert(0, ProposalInfo {
+            block_hash,
+            priority_message,
+            block,
+            signature,
+            is_imported: false,
+        });
     }
 
-    fn get_highest_info(&self) -> Option<&PriorityMessage> {
-        match self {
-            Proposal::ProposalHighest(_, priority_message, ..) => Some(priority_message),
-            _ => None,
-        }
+    pub fn get_highest_proposal_info(&self) -> Option<&ProposalInfo> {
+        self.get(0)
     }
 
-    #[inline]
     pub fn get_highest_priority(&self) -> Option<Priority> {
-        self.get_highest_info().map(|info| info.priority())
+        self.get(0).map(|info| info.priority_message.priority())
     }
 
-    pub fn new_imported(hash: BlockHash) -> Self {
-        Proposal::ProposalImported(hash)
+    pub fn new_imported(&mut self, block_hash: BlockHash) {
+        if let Some(mut info) = self.iter_mut().find(|info| info.block_hash == block_hash) {
+            info.is_imported = true;
+        }
     }
 
     pub fn block_hash(&self) -> Option<BlockHash> {
-        match self {
-            Proposal::ProposalHighest(hash, ..) => Some(*hash),
-            Proposal::ProposalImported(hash) => Some(*hash),
-            Proposal::None => None,
-        }
+        self.get(0).map(|info| info.block_hash)
     }
 
     pub fn imported_block_hash(&self) -> Option<BlockHash> {
-        match self {
-            Proposal::ProposalHighest(..) => None,
-            Proposal::ProposalImported(hash) => Some(*hash),
-            Proposal::None => None,
-        }
+        self.iter().find(|&info| info.is_imported).map(|info| info.block_hash)
     }
 }

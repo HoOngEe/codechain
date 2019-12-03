@@ -196,7 +196,7 @@ impl Worker {
             votes: Default::default(),
             signer: Default::default(),
             last_two_thirds_majority: TwoThirdsMajority::Empty,
-            proposal: Proposal::None,
+            proposal: Proposal::new(),
             finalized_view_of_previous_block: 0,
             finalized_view_of_current_block: None,
             validators,
@@ -634,7 +634,7 @@ impl Worker {
     fn increment_view(&mut self, n: View) {
         cinfo!(ENGINE, "increment_view: New view.");
         self.view += n;
-        self.proposal = Proposal::None;
+        self.proposal = Proposal::new();
         self.votes_received = MutTrigger::new(BitSet::new());
     }
 
@@ -651,7 +651,7 @@ impl Worker {
         self.last_two_thirds_majority = TwoThirdsMajority::Empty;
         self.height += 1;
         self.view = 0;
-        self.proposal = Proposal::None;
+        self.proposal = Proposal::new();
         self.votes_received = MutTrigger::new(BitSet::new());
         self.finalized_view_of_previous_block =
             self.finalized_view_of_current_block.expect("self.step == Step::Commit");
@@ -669,7 +669,7 @@ impl Worker {
         self.last_two_thirds_majority = TwoThirdsMajority::Empty;
         self.height = height;
         self.view = 0;
-        self.proposal = Proposal::None;
+        self.proposal = Proposal::new();
         self.votes_received = MutTrigger::new(BitSet::new());
         self.finalized_view_of_previous_block = finalized_view_of_previous_height;
         self.finalized_view_of_current_block = None;
@@ -731,7 +731,7 @@ impl Worker {
                         // Proposal is received but is not verified yet.
                         // Wait for verification.
                     }
-                    self.proposal = Proposal::new_imported(hash);
+                    self.proposal.new_imported(hash);
                 }
                 let parent_block_hash = self.prev_block_hash();
                 if let Some(sortition_info) = self.signer_priority_message(parent_block_hash) {
@@ -1004,17 +1004,13 @@ impl Worker {
         let current_vote_step = VoteStep::new(self.height, self.view, self.step.to_step());
         let proposal_is_for_current = self.votes.has_votes_for(&current_vote_step, proposal.hash());
         if proposal_is_for_current {
-            self.proposal = Proposal::new_imported(proposal.hash());
+            self.proposal.new_imported(proposal.hash());
             let current_step = self.step.clone();
             match current_step {
-                TendermintState::Propose => {
-                    //self.move_to_step(TendermintState::Prevote, false);
-                }
                 TendermintState::ProposeWaitImported {
                     block,
                 } => {
                     cinfo!(ENGINE, "Submitting proposal block {}", block.header().hash());
-                    self.move_to_step(TendermintState::Prevote, false);
                     self.broadcast_proposal_block(
                         self.view,
                         self.priority_messages.get_highest_priority_message(&self.current_sortition_round()).unwrap(),
@@ -1038,7 +1034,7 @@ impl Worker {
                 proposal.hash(),
             );
             if proposal_is_for_view0 {
-                self.proposal = Proposal::new_imported(proposal.hash())
+                self.proposal.new_imported(proposal.hash())
             }
             self.move_to_step(TendermintState::Prevote, false);
         }
@@ -1076,7 +1072,7 @@ impl Worker {
 
             if let Some(proposal) = backup.proposal {
                 if client.block(&BlockId::Hash(proposal)).is_some() {
-                    self.proposal = Proposal::ProposalImported(proposal);
+                    self.proposal.new_imported(proposal);
                 }
             }
 
@@ -1509,11 +1505,11 @@ impl Worker {
 
     fn repropose_block(&mut self, priority_message: PriorityMessage, block: encoded::Block) {
         let header = block.decode_header();
-        self.vote_on_header_for_proposal(&header).expect("I am proposer");
+        self.vote_on_header_for_proposal(&header).expect("I am eligible to be a proposer");
 
         debug_assert!(self.client().block(&BlockId::Hash(header.hash())).is_some());
 
-        self.proposal = Proposal::new_imported(header.hash());
+        self.proposal.new_imported(header.hash());
         self.broadcast_proposal_block(self.view, priority_message, block);
     }
 
@@ -1868,11 +1864,20 @@ impl Worker {
                         proposed_view,
                         author_view
                     );
-                    self.proposal = Proposal::new_imported(header_view.hash());
-                } else {
-                    // The received proposal is higher than the current highest proposal.
-                    self.proposal =
-                        Proposal::new_highest(header_view.hash(), priority_message, bytes.clone(), signature);
+                    self.proposal.new_highest(header_view.hash(), priority_message, bytes.clone(), signature);
+                    self.proposal.new_imported(header_view.hash());
+                } else if Some(priority_message.priority())
+                    >= self
+                        .priority_messages
+                        .get_highest_priority_message(&self.current_sortition_round())
+                        .map(|priority_message| priority_message.priority())
+                {
+                    cdebug!(
+                        ENGINE,
+                        "Received a proposal with the priority {}. Replace the highest proposal",
+                        priority_message.priority()
+                    );
+                    self.proposal.new_highest(header_view.hash(), priority_message, bytes.clone(), signature);
                 }
                 self.broadcast_state(
                     VoteStep::new(self.height, self.view, self.step.to_step()),
@@ -2032,12 +2037,12 @@ impl Worker {
         }
 
         if requested_round == self.current_sortition_round() {
-            if let Proposal::ProposalHighest(_hash, sortition_info, block, signature) = &self.proposal {
+            if let Some(proposal_info) = self.proposal.get_highest_proposal_info() {
                 self.send_proposal_block(
-                    *signature,
-                    sortition_info.clone(),
+                    *proposal_info.signature(),
+                    proposal_info.priority_message().clone(),
                     requested_round.view,
-                    block.clone(),
+                    proposal_info.block().clone(),
                     result,
                 );
             }
@@ -2238,7 +2243,7 @@ impl Worker {
         }
 
         // Since we don't have proposal vote, set proposal = None
-        self.proposal = Proposal::None;
+        self.proposal = Proposal::new();
         self.view = commit_view;
         self.votes_received = MutTrigger::new(vote_bitset);
         self.last_two_thirds_majority = TwoThirdsMajority::Empty;
