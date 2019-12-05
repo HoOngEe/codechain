@@ -681,7 +681,7 @@ impl Worker {
 
     #[allow(clippy::cognitive_complexity)]
     fn move_to_step(&mut self, state: TendermintState, is_restoring: bool) {
-        ctrace!(ENGINE, "Transition to {:?} triggered from {:?}.", state, self.step);
+        ctrace!(ENGINE, "Transition to {:?} triggered from {:?} {}.", state, self.step, self.height);
         let prev_step = mem::replace(&mut self.step, state.clone());
         if !is_restoring {
             self.backup();
@@ -1025,7 +1025,11 @@ impl Worker {
                 if !self.proposal.new_imported(proposal_hash)
                     && Some(priority_message.priority()) > self.proposal.get_highest_priority()
                 {
-                    self.handle_self_genearted_proposal(proposal_hash, priority_message.clone(), imported_block.rlp_bytes());
+                    self.handle_self_genearted_proposal(
+                        proposal_hash,
+                        priority_message.clone(),
+                        imported_block.rlp_bytes(),
+                    );
                 }
 
                 self.broadcast_proposal_block(
@@ -1038,11 +1042,14 @@ impl Worker {
                 }
             }
         } else if current_height < height {
+            // height = current_height + 1
             let finalized_view_of_previous_height =
                 TendermintSealView::new(proposal.seal()).parent_block_finalized_view().unwrap();
 
+            let mut proposal_for_the_new_height = Proposal::new();
             self.jump_to_height(height, finalized_view_of_previous_height);
 
+            let proposal_hash = proposal.hash();
             let imported_block = self.client().block(&proposal_hash.into()).expect("The block is imported");
             let proposal_vote_step = VoteStep {
                 height,
@@ -1052,9 +1059,21 @@ impl Worker {
 
             let proposal_is_for_view0 = self.votes.has_votes_for(&proposal_vote_step, proposal_hash);
             if proposal_is_for_view0 {
-                self.proposal.new_imported(proposal.hash());
+                let priority_message = self
+                    .priority_messages
+                    .get_highest_priority_message(&proposal_vote_step.into())
+                    .expect("The priority message should be included before import");
+                let signature = self.votes.round_signature(&proposal_vote_step, &proposal_hash).expect("vote exists");
+                proposal_for_the_new_height.new_highest(
+                    proposal_hash,
+                    priority_message,
+                    imported_block.into_inner(),
+                    signature,
+                );
+                proposal_for_the_new_height.new_imported(proposal_hash);
             }
-            self.move_to_step(TendermintState::Prevote, false);
+            self.proposal = proposal_for_the_new_height;
+            self.move_to_step(TendermintState::new_propose_step(), false);
         }
     }
 
