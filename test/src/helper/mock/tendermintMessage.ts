@@ -44,6 +44,29 @@ interface VoteStep {
     step: Step;
 }
 
+interface SortitionRound {
+    height: number;
+    view: number;
+}
+
+interface SeedInfo {
+    seed_signer_idx: number;
+    seed: H256;
+    proof: Buffer;
+}
+
+interface PriorityInfo {
+    priority: H256;
+    sub_user_idx: number;
+    vrf_proof: Buffer;
+    vrf_hash: Buffer;
+}
+
+interface PriorityMessage {
+    seed: SeedInfo;
+    priority: PriorityInfo;
+}
+
 export interface ConsensusMessage {
     type: "consensusmessage";
     messages: Array<{
@@ -59,6 +82,7 @@ export interface ConsensusMessage {
 export interface ProposalBlock {
     type: "proposalblock";
     signature: string;
+    priority_message: PriorityMessage;
     view: number;
     message: Buffer;
 }
@@ -67,6 +91,7 @@ export interface StepState {
     type: "stepstate";
     voteStep: VoteStep;
     proposal: H256 | null;
+    priority: H256 | null;
     lockView: number | null;
     knownVotes: Buffer;
 }
@@ -79,8 +104,7 @@ export interface RequestMessage {
 
 export interface RequestProposal {
     type: "requestproposal";
-    height: number;
-    view: number;
+    round: SortitionRound;
 }
 
 type MessageBody =
@@ -124,8 +148,23 @@ export class TendermintMessage {
                 message = {
                     type: "proposalblock",
                     signature: decoded[1].toString("hex"),
-                    view: readUIntRLP(decoded[2]),
-                    message: uncompressSync(decoded[3])
+                    priority_message: {
+                        seed: {
+                            seed_signer_idx: readUIntRLP(decoded[2][0][0]),
+                            seed: new H256(decoded[2][0][1][0].toString("hex")),
+                            proof: decoded[2][0][2]
+                        },
+                        priority: {
+                            priority: new H256(
+                                decoded[2][1][0].toString("hex")
+                            ),
+                            sub_user_idx: readUIntRLP(decoded[2][1][1]),
+                            vrf_proof: decoded[2][1][2],
+                            vrf_hash: decoded[2][1][3]
+                        }
+                    },
+                    view: readUIntRLP(decoded[3]),
+                    message: uncompressSync(decoded[4])
                 };
                 break;
             }
@@ -141,8 +180,12 @@ export class TendermintMessage {
                         decoded[2],
                         buffer => new H256(buffer.toString("hex"))
                     ),
-                    lockView: readOptionalRlp(decoded[3], readUIntRLP),
-                    knownVotes: decoded[4]
+                    priority: readOptionalRlp(
+                        decoded[3],
+                        buffer => new H256(buffer.toString("hex"))
+                    ),
+                    lockView: readOptionalRlp(decoded[4], readUIntRLP),
+                    knownVotes: decoded[5]
                 };
                 break;
             }
@@ -161,8 +204,10 @@ export class TendermintMessage {
             case MessageType.MESSAGE_ID_REQUEST_PROPOSAL: {
                 message = {
                     type: "requestproposal",
-                    height: readUIntRLP(decoded[1]),
-                    view: readUIntRLP(decoded[2])
+                    round: {
+                        height: readUIntRLP(decoded[1][0]),
+                        view: readUIntRLP(decoded[1][1])
+                    }
                 };
                 break;
             }
@@ -210,6 +255,25 @@ export class TendermintMessage {
                 return [
                     MessageType.MESSAGE_ID_PROPOSAL_BLOCK,
                     Buffer.from(this.body.signature, "hex"),
+                    [
+                        [
+                            new U64(
+                                this.body.priority_message.seed.seed_signer_idx
+                            ).toEncodeObject(),
+                            [
+                                this.body.priority_message.seed.seed.toEncodeObject()
+                            ],
+                            this.body.priority_message.seed.proof
+                        ],
+                        [
+                            this.body.priority_message.priority.priority.toEncodeObject(),
+                            new U64(
+                                this.body.priority_message.priority.sub_user_idx
+                            ).toEncodeObject(),
+                            this.body.priority_message.priority.vrf_proof,
+                            this.body.priority_message.priority.vrf_hash
+                        ]
+                    ],
                     new U64(this.body.view).toEncodeObject(),
                     compressSync(this.body.message)
                 ];
@@ -225,6 +289,9 @@ export class TendermintMessage {
                     this.body.proposal == null
                         ? []
                         : [this.body.proposal.toEncodeObject()],
+                    this.body.priority == null
+                        ? []
+                        : [this.body.priority.toEncodeObject()],
                     this.body.lockView == null
                         ? []
                         : [new U64(this.body.lockView).toEncodeObject()],
@@ -245,8 +312,10 @@ export class TendermintMessage {
             case "requestproposal": {
                 return [
                     MessageType.MESSAGE_ID_REQUEST_PROPOSAL,
-                    new U64(this.body.height).toEncodeObject(),
-                    new U64(this.body.view).toEncodeObject()
+                    [
+                        new U64(this.body.round.height).toEncodeObject(),
+                        new U64(this.body.round.view).toEncodeObject()
+                    ]
                 ];
             }
         }
