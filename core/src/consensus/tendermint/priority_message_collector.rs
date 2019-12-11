@@ -38,6 +38,10 @@ impl PriorityMessageCollector {
         let new_collector = self.messages.split_off(round);
         self.messages = new_collector;
     }
+
+    pub fn get_inner(&self) -> &BTreeMap<SortitionRound, BTreeSet<PriorityMessage>> {
+        &self.messages
+    }
 }
 
 #[cfg(test)]

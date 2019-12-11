@@ -386,7 +386,7 @@ impl TwoThirdsMajority {
 }
 
 /// ProposalInfo stores the information for a valid proposal
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, RlpEncodable, RlpDecodable)]
 pub struct ProposalInfo {
     block_hash: BlockHash,
     priority_message: PriorityMessage,
@@ -424,6 +424,18 @@ impl Deref for Proposal {
 impl DerefMut for Proposal {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
+    }
+}
+
+impl Encodable for Proposal {
+    fn rlp_append(&self, s: &mut RlpStream) {
+        s.append_list(&self.0);
+    }
+}
+
+impl Decodable for Proposal {
+    fn decode(rlp: &Rlp) -> Result<Self, DecoderError> {
+        Ok(Proposal(rlp.as_list()?))
     }
 }
 
@@ -471,5 +483,26 @@ impl Proposal {
 
     pub fn imported_block_hash(&self) -> Option<BlockHash> {
         self.iter().find(|&info| info.is_imported).map(|info| info.block_hash)
+    }
+}
+
+#[cfg(test)]
+mod tendermint_types_tests {
+    use primitives::H256;
+    use rlp::rlp_encode_and_decode_test;
+
+    use super::*;
+
+    #[test]
+    fn proposal_encode_and_decode() {
+        let proposal = Proposal(vec![ProposalInfo {
+            block_hash: BlockHash::from(H256::random()),
+            priority_message: Default::default(),
+            block: vec![0x10],
+            signature: SchnorrSignature::random(),
+            is_imported: true,
+        }]);
+
+        rlp_encode_and_decode_test!(proposal);
     }
 }

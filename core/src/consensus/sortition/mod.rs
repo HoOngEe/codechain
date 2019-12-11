@@ -36,6 +36,16 @@ pub struct PriorityMessage {
     pub priority_info: PriorityInfo,
 }
 
+#[cfg(test)]
+impl Default for PriorityMessage {
+    fn default() -> Self {
+        Self {
+            seed_info: SeedInfo::from_fields(0, vec![], vec![]),
+            priority_info: PriorityInfo::create_from_members(0x00.into(), 0, vec![], vec![]),
+        }
+    }
+}
+
 impl Ord for PriorityMessage {
     fn cmp(&self, other: &Self) -> Ordering {
         self.priority().cmp(&other.priority())

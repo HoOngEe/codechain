@@ -32,7 +32,7 @@ use rlp::{Encodable, Rlp};
 use vrf::openssl::{CipherSuite, ECVRF};
 
 use super::super::BitSet;
-use super::backup::{backup, restore, BackupView};
+use super::backup::{backup, restore, BackupView, PriorityMessageProjection, PriorityMessageProjectionView};
 use super::message::*;
 use super::network;
 use super::params::TimeGapParams;
@@ -1077,12 +1077,26 @@ impl Worker {
         }
     }
 
+    fn create_priority_message_backup_projection_view(&self) -> Vec<PriorityMessageProjectionView> {
+        self.priority_messages
+            .get_inner()
+            .iter()
+            .flat_map(|(round, set)| {
+                set.iter()
+                    .map(|priority_message| PriorityMessageProjectionView((round, priority_message)))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
     fn backup(&self) {
         backup(self.client().get_kvdb().as_ref(), BackupView {
             height: &self.height,
             view: &self.view,
             step: &self.step.to_step(),
             votes: &self.votes.get_all(),
+            priority_messages: &self.create_priority_message_backup_projection_view(),
+            proposal: &self.proposal,
             finalized_view_of_previous_block: &self.finalized_view_of_previous_block,
             finalized_view_of_current_block: &self.finalized_view_of_current_block,
         });
@@ -1104,14 +1118,14 @@ impl Worker {
             self.step = backup_step;
             self.height = backup.height;
             self.view = backup.view;
+            self.proposal = backup.proposal;
+            backup.priority_messages.into_iter().for_each(|projection| match projection {
+                PriorityMessageProjection((round, priority_message)) => {
+                    self.priority_messages.insert(priority_message, round)
+                }
+            });
             self.finalized_view_of_previous_block = backup.finalized_view_of_previous_block;
             self.finalized_view_of_current_block = backup.finalized_view_of_current_block;
-
-            if let Some(proposal) = backup.proposal {
-                if client.block(&BlockId::Hash(proposal)).is_some() {
-                    self.proposal.new_imported(proposal);
-                }
-            }
 
             for vote in backup.votes {
                 let bytes = rlp::encode(&vote);
