@@ -39,6 +39,7 @@ pub struct VRFSortition {
 pub struct PriorityInfo {
     priority: Priority,
     sub_user_idx: u64,
+    number_of_elections: u64,
     vrf_proof: Vec<u8>,
     vrf_hash: Vec<u8>,
 }
@@ -65,6 +66,7 @@ impl VRFSortition {
             .map(|(highest_priority, highest_sub_user_idx)| PriorityInfo {
                 priority: highest_priority,
                 sub_user_idx: highest_sub_user_idx,
+                number_of_elections: j,
                 vrf_proof,
                 vrf_hash,
             }))
@@ -72,6 +74,10 @@ impl VRFSortition {
 }
 
 impl PriorityInfo {
+    pub fn number_of_elections(&self) -> u64 {
+        self.number_of_elections
+    }
+
     pub fn priority(&self) -> Priority {
         self.priority
     }
@@ -104,6 +110,7 @@ impl PriorityInfo {
         Self {
             priority,
             sub_user_idx,
+            number_of_elections: sub_user_idx,
             vrf_proof,
             vrf_hash,
         }
@@ -223,6 +230,7 @@ mod vrf_tests {
         let priority_info = PriorityInfo {
             priority: H256::random(),
             sub_user_idx: 1,
+            number_of_elections: 1,
             vrf_hash: vec![0x10, 0x11, 0x30, 0x31],
             vrf_proof: vec![0x41, 0x22, 0x11, 0x12, 0x22, 0x78],
         };

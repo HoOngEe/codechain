@@ -22,6 +22,7 @@ pub mod seed;
 pub mod vrf_sortition;
 
 use std::cmp::Ordering;
+use std::fmt;
 
 use ckey::Public;
 use vrf::openssl::{Error as VRFError, ECVRF};
@@ -34,6 +35,19 @@ use crate::consensus::{Height, View};
 pub struct PriorityMessage {
     pub seed_info: SeedInfo,
     pub priority_info: PriorityInfo,
+}
+
+impl fmt::Display for PriorityMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "index-info {}-{}-{} with priority {:?}",
+            self.seed_info.signer_idx(),
+            self.priority_info.sub_user_idx(),
+            self.priority_info.number_of_elections(),
+            self.priority_info.priority(),
+        )
+    }
 }
 
 #[cfg(test)]

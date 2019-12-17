@@ -736,13 +736,21 @@ impl Worker {
                 let parent_block_hash = self.prev_block_hash();
                 if let Some(sortition_info) = self.signer_priority_message(parent_block_hash) {
                     if let TwoThirdsMajority::Lock(lock_view, locked_block_hash) = self.last_two_thirds_majority {
-                        cinfo!(ENGINE, "I am eligible to be a proposer, I'll re-propose a locked block");
+                        cinfo!(ENGINE, "I am eligible to be a proposer, round-info {}-{} and {}. I'll re-propose a locked block with priority",
+                            self.height,
+                            self.view,
+                            sortition_info,
+                        );
                         match self.locked_proposal_block(lock_view, locked_block_hash) {
                             Ok(block) => self.repropose_block(sortition_info, block),
                             Err(error_msg) => cwarn!(ENGINE, "{}", error_msg),
                         }
                     } else {
-                        cinfo!(ENGINE, "I am eligible to be a proposer, I'll create a block");
+                        cinfo!(ENGINE, "I am eligible to be a proposer, round-info {}-{} and {}. I'll create a block with priority",
+                            self.height,
+                            self.view,
+                            sortition_info,
+                        );
                         self.priority_messages.insert(sortition_info.clone(), self.current_sortition_round());
                         self.update_sealing(parent_block_hash);
                         self.step.wait_block_generation(sortition_info, parent_block_hash);
@@ -750,7 +758,10 @@ impl Worker {
                 } else {
                     let sortition_round = vote_step.into();
                     let round_highest_priority = self.get_round_highest_priority(&sortition_round);
-                    cinfo!(ENGINE, "I am not eligible to be a proposer, I'll request a proposal");
+                    cinfo!(ENGINE, "I am not eligible to be a proposer, round-info {}-{}. I'll request a proposal",
+                        self.height,
+                        self.view,
+                    );
                     self.request_proposal_to_superiors(sortition_round, round_highest_priority);
                 }
             }
@@ -1801,7 +1812,15 @@ impl Worker {
             let block_view = BlockView::new(&bytes);
             let header_view = block_view.header();
             let number = header_view.number();
-            cinfo!(ENGINE, "Proposal received for {}-{:?}", number, header_view.hash());
+            cinfo!(
+                ENGINE,
+                "Proposal received for ({},{})-{:?}. The priority message was created by index {}-{}",
+                number,
+                proposed_view,
+                header_view.hash(),
+                priority_message.seed_signer_idx(),
+                priority_message.priority_info.sub_user_idx()
+            );
 
             let parent_hash = header_view.parent_hash();
             {
