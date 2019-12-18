@@ -58,6 +58,7 @@ interface SeedInfo {
 interface PriorityInfo {
     priority: H256;
     sub_user_idx: number;
+    number_of_elections: number;
     vrf_proof: Buffer;
     vrf_hash: Buffer;
 }
@@ -159,8 +160,9 @@ export class TendermintMessage {
                                 decoded[2][1][0].toString("hex")
                             ),
                             sub_user_idx: readUIntRLP(decoded[2][1][1]),
-                            vrf_proof: decoded[2][1][2],
-                            vrf_hash: decoded[2][1][3]
+                            number_of_elections: readUIntRLP(decoded[2][1][2]),
+                            vrf_proof: decoded[2][1][3],
+                            vrf_hash: decoded[2][1][4],
                         }
                     },
                     view: readUIntRLP(decoded[3]),
@@ -269,6 +271,9 @@ export class TendermintMessage {
                             this.body.priority_message.priority.priority.toEncodeObject(),
                             new U64(
                                 this.body.priority_message.priority.sub_user_idx
+                            ).toEncodeObject(),
+                            new U64(
+                                this.body.priority_message.priority.number_of_elections
                             ).toEncodeObject(),
                             this.body.priority_message.priority.vrf_proof,
                             this.body.priority_message.priority.vrf_hash
