@@ -103,7 +103,7 @@ impl PriorityMessage {
             voting_power,
             sortition_scheme.total_power,
             sortition_scheme.expectation,
-        ) && self.priority_info.verify_priority()
+        ) && self.priority_info.verify_priority(signer_public, &mut sortition_scheme.vrf_inst)?
             && self.priority_info.verify_vrf_hash(signer_public, self.seed(), &mut sortition_scheme.vrf_inst)?)
     }
 

@@ -758,7 +758,9 @@ impl Worker {
                 } else {
                     let sortition_round = vote_step.into();
                     let round_highest_priority = self.get_round_highest_priority(&sortition_round);
-                    cinfo!(ENGINE, "I am not eligible to be a proposer, round-info {}-{}. I'll request a proposal",
+                    cinfo!(
+                        ENGINE,
+                        "I am not eligible to be a proposer, round-info {}-{}. I'll request a proposal",
                         self.height,
                         self.view,
                     );

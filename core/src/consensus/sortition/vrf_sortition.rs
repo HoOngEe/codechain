@@ -16,7 +16,6 @@
 
 #![allow(dead_code)]
 
-use ccrypto::sha256;
 use ckey::{standard_uncompressed_pubkey, Public};
 use primitives::H256;
 use vrf::openssl::{Error as VRFError, ECVRF};
@@ -38,6 +37,7 @@ pub struct VRFSortition {
 #[derive(Eq, PartialEq, Clone, Debug, RlpEncodable, RlpDecodable)]
 pub struct PriorityInfo {
     priority: Priority,
+    priority_proof: Vec<u8>,
     sub_user_idx: u64,
     number_of_elections: u64,
     vrf_proof: Vec<u8>,
@@ -59,12 +59,13 @@ impl VRFSortition {
                 let sub_user_idx_vec = sub_user_idx.to_be_bytes();
                 let concatenated = [&vrf_hash[..], &sub_user_idx_vec[..]].concat();
 
-                let priority = sha256(&concatenated);
-                (priority, sub_user_idx)
+                let (priority_proof, priority) = signer.vrf_proof_and_hash(&concatenated, &mut self.vrf_inst).unwrap();
+                (H256::from_slice(&priority), priority_proof, sub_user_idx)
             })
             .max()
-            .map(|(highest_priority, highest_sub_user_idx)| PriorityInfo {
+            .map(|(highest_priority, highest_priority_proof, highest_sub_user_idx)| PriorityInfo {
                 priority: highest_priority,
+                priority_proof: highest_priority_proof,
                 sub_user_idx: highest_sub_user_idx,
                 number_of_elections: j,
                 vrf_proof,
@@ -97,18 +98,20 @@ impl PriorityInfo {
         self.sub_user_idx < j
     }
 
-    pub fn verify_priority(&self) -> bool {
+    pub fn verify_priority(&self, signer_public: &Public, vrf_inst: &mut ECVRF) -> Result<bool, VRFError> {
+        let standard_form_pubkey = standard_uncompressed_pubkey(signer_public);
         let sub_user_idx_vec = self.sub_user_idx.to_be_bytes();
         let concatenated = [&self.vrf_hash[..], &sub_user_idx_vec[..]].concat();
 
-        let expected_priority = sha256(&concatenated);
-        expected_priority == self.priority
+        let verified_priority = vrf_inst.verify(&standard_form_pubkey, &self.priority_proof, &concatenated)?;
+        Ok(H256::from_slice(&verified_priority) == self.priority)
     }
 
     #[cfg(test)]
     pub fn create_from_members(priority: Priority, sub_user_idx: u64, vrf_proof: Vec<u8>, vrf_hash: Vec<u8>) -> Self {
         Self {
             priority,
+            priority_proof: vec![],
             sub_user_idx,
             number_of_elections: sub_user_idx,
             vrf_proof,
@@ -138,10 +141,9 @@ mod vrf_tests {
             expectation: 50.0,
             vrf_inst: ec_vrf,
         };
-        // maximized when sha256(vrf_result || byte expression of 1u64), the testing oracle is generated from python sha256.
         let expected_priority =
-            H256::from_slice(&hex::decode("ddc2ca3bd180e1af8fdec721ea863f79ad33279da2148dd58953b44420a0abca").unwrap());
-        let expected_sub_user_idx = 1;
+            H256::from_slice(&hex::decode("d0fddcb1e8102b05537a42ff51db2c59369558439924ad4826619558433739fa").unwrap());
+        let expected_sub_user_idx = 0;
         let actual_priority_info =
             sortition_scheme.create_highest_priority_info(seed.into(), &signer, 10).unwrap().unwrap();
         assert_eq!(expected_priority, actual_priority_info.priority());
@@ -211,7 +213,9 @@ mod vrf_tests {
 
     #[test]
     fn test_priority() {
-        let signer = EngineSigner::create_engine_signer_with_secret(sha256("secret_key4"));
+        let secret = sha256("secret_key4");
+        let signer = EngineSigner::create_engine_signer_with_secret(secret);
+        let pub_key = *KeyPair::from_private(secret.into()).expect("Valid private key").public();
         let seed = sha256("seed4");
         let ec_vrf = ECVRF::from_suite(CipherSuite::SECP256K1_SHA256_SVDW).unwrap();
         let mut sortition_scheme = VRFSortition {
@@ -222,13 +226,14 @@ mod vrf_tests {
         let voting_power = 50;
         let priority_info =
             sortition_scheme.create_highest_priority_info(seed.into(), &signer, voting_power).unwrap().unwrap();
-        assert!(priority_info.verify_priority());
+        assert!(priority_info.verify_priority(&pub_key, &mut sortition_scheme.vrf_inst).unwrap());
     }
 
     #[test]
     fn test_encode_and_decode_priority_info() {
         let priority_info = PriorityInfo {
             priority: H256::random(),
+            priority_proof: vec![0x10],
             sub_user_idx: 1,
             number_of_elections: 1,
             vrf_hash: vec![0x10, 0x11, 0x30, 0x31],
