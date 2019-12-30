@@ -1876,35 +1876,6 @@ impl Worker {
                 _ => {}
             }
 
-            // priority verification block
-            {
-                let parent_seed = self.prev_vrf_seed_of_height(number)?;
-                let signer_idx = priority_message.seed_signer_idx();
-
-                match priority_message.verify_seed(
-                    number,
-                    proposed_view,
-                    &parent_seed,
-                    &signer_public,
-                    &mut self.sortition_scheme.vrf_inst,
-                ) {
-                    Ok(true) => {}
-                    _ => {
-                        cwarn!(ENGINE, "Proposal VRF seed verification failed");
-                        return None
-                    }
-                };
-
-                let voting_power = self.get_voting_power(&parent_hash, signer_idx);
-                match priority_message.verify_priority(&signer_public, voting_power, &mut self.sortition_scheme) {
-                    Ok(true) => {}
-                    _ => {
-                        cwarn!(ENGINE, "Priority message verification failed");
-                        return None
-                    }
-                }
-            }
-
             if self.votes.is_old_or_known(&message) {
                 cdebug!(ENGINE, "Proposal is already known");
                 return None

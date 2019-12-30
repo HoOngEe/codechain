@@ -16,6 +16,9 @@
 
 #![allow(dead_code)]
 
+use std::fs::File;
+use std::io::prelude::*;
+
 use ckey::{standard_uncompressed_pubkey, Public};
 use primitives::H256;
 use vrf::openssl::{Error as VRFError, ECVRF};
@@ -47,19 +50,26 @@ pub struct PriorityInfo {
 impl VRFSortition {
     pub fn create_highest_priority_info(
         &mut self,
-        seed: VRFSeed,
-        signer: &EngineSigner,
+        _seed: VRFSeed,
+        _signer: &EngineSigner,
         voting_power: u64,
     ) -> Result<Option<PriorityInfo>, AccountProviderError> {
-        let (vrf_proof, vrf_hash) = signer.vrf_proof_and_hash(&seed, &mut self.vrf_inst)?;
+        let mut vrf_hash = [0; 32];
+        {
+            let mut f = File::open("/dev/urandom").unwrap();
+            f.read(&mut vrf_hash).unwrap();
+        }
+        let (vrf_proof, vrf_hash) = (vec![], vrf_hash.to_vec());
         let j = draw(voting_power, self.total_power, self.expectation, &vrf_hash);
 
         Ok((0..j)
             .map(|sub_user_idx| {
-                let sub_user_idx_vec = sub_user_idx.to_be_bytes();
-                let concatenated = [&vrf_hash[..], &sub_user_idx_vec[..]].concat();
-
-                let (priority_proof, priority) = signer.vrf_proof_and_hash(&concatenated, &mut self.vrf_inst).unwrap();
+                let mut priority = [0; 32];
+                {
+                    let mut f = File::open("/dev/urandom").unwrap();
+                    f.read(&mut priority).unwrap();
+                }
+                let (priority_proof, priority) = (vec![], priority.to_vec());
                 (H256::from_slice(&priority), priority_proof, sub_user_idx)
             })
             .max()
