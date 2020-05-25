@@ -1,3 +1,5 @@
+#!/usr/bin/env -S npx ts-node
+
 // Copyright 2018-2019 Kodebox, Inc.
 // This file is part of CodeChain.
 //
@@ -14,53 +16,56 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-import { faucetAddress, faucetSecret } from "../helper/constants";
+import { SDK } from "codechain-sdk";
+import { H256 } from "codechain-sdk/lib/core/classes";
 import { wait } from "../helper/promise";
 import { makeRandomH256 } from "../helper/random";
-import CodeChain from "../helper/spawn";
 
 (async () => {
     const numTransactions = parseInt(process.env.TEST_NUM_TXS || "10000", 10);
-    const rpcPort = parseInt(process.env.TEST_RPC_PORT || "8080", 10);
 
-    const node = new CodeChain({
-        argv: ["--reseal-min-period", "0"],
-        rpcPort
+    const sdk = new SDK({
+        server: "http://192.168.1.101:2487",
+        networkId: "bc"
     });
 
+    const tempAccount = "bccqxsd0f56vwydcndezvhhc5klgwj4yrle4s22j075";
+    const tempPrivate =
+        "a056c66080e627a0fa32c0c9fa898d6c074f1af4d896f0a16cee27cb7e129a8b";
+
+    const beagleStakeHolder1 = "bccqy204w0m6stuahxlx3p58kc0hsgd42npqcrx8lce";
+    const beagleStakeHolder1Password = "ZjXBREPbc9mcZRyY";
     const transactions = [];
-    const baseSeq = await node.sdk.rpc.chain.getSeq(faucetAddress);
+    const baseSeq = await sdk.rpc.chain.getSeq(tempAccount);
+    console.log("Seq fetch has been done");
 
     for (let i = 0; i < numTransactions; i++) {
-        const value = makeRandomH256();
-        const accountId = node.sdk.util.getAccountIdFromPrivate(value);
-        const recipient = node.sdk.core.classes.PlatformAddress.fromAccountId(
-            accountId,
-            { networkId: "tc" }
-        );
-        const transaciton = node.sdk.core
+        const recipient = beagleStakeHolder1;
+        const transaciton = sdk.core
             .createPayTransaction({
                 recipient,
                 quantity: 1
             })
             .sign({
-                secret: faucetSecret,
+                secret: tempPrivate,
                 seq: baseSeq + i,
-                fee: 10
+                fee: 100
             });
         transactions.push(transaciton);
+        console.log(`${i}th transaction is generated`);
     }
 
+    let lastHash: H256 = H256.zero();
     for (let i = numTransactions - 1; i > 0; i--) {
-        await node.sdk.rpc.chain.sendSignedTransaction(transactions[i]);
+        lastHash = await sdk.rpc.chain.sendSignedTransaction(transactions[i]);
+        console.log(`${i}th transcation is sent`);
     }
     const startTime = new Date();
     console.log(`Start at: ${startTime}`);
-    await node.sdk.rpc.chain.sendSignedTransaction(transactions[0]);
+    await sdk.rpc.chain.sendSignedTransaction(transactions[0]);
 
     while (true) {
-        const hash = transactions[numTransactions - 1].hash();
-        const result = await node.sdk.rpc.chain.containsTransaction(hash);
+        const result = await sdk.rpc.chain.containsTransaction(lastHash);
         console.log(`Node result: ${result}`);
         if (result) {
             break;

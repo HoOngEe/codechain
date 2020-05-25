@@ -1,3 +1,5 @@
+#!/usr/bin/env -S npx ts-node
+
 // Copyright 2018-2019 Kodebox, Inc.
 // This file is part of CodeChain.
 //
@@ -14,6 +16,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+const { exec } = require("child_process");
 import {
     faucetAddress,
     faucetSecret,
@@ -47,10 +50,11 @@ import CodeChain from "../helper/spawn";
                 "--no-discovery",
                 "--enable-devel-api"
             ],
-            additionalKeysPath: "tendermint/keys"
+            additionalKeysPath: "../../tendermint/keys"
         });
     });
-    await Promise.all(nodes.map(node => node.start()));
+    const pids = await Promise.all(nodes.map(node => node.start()));
+    console.log(pids);
 
     await Promise.all([
         nodes[0].connect(nodes[1]),
@@ -68,7 +72,7 @@ import CodeChain from "../helper/spawn";
     ]);
 
     const transactions = [];
-    const numTransactions = parseInt(process.env.TEST_NUM_TXS || "10000", 10);
+    const numTransactions = parseInt(process.env.TEST_NUM_TXS || "100", 10);
     const baseSeq = await nodes[0].sdk.rpc.chain.getSeq(faucetAddress);
 
     for (let i = 0; i < numTransactions; i++) {
@@ -91,6 +95,7 @@ import CodeChain from "../helper/spawn";
         transactions.push(transaction);
     }
 
+    exec(`sudo perf record -p ${pids[0]}`);
     for (let i = numTransactions - 1; i > 0; i--) {
         await nodes[0].sdk.rpc.chain.sendSignedTransaction(transactions[i]);
     }

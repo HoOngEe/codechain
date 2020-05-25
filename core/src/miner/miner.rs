@@ -530,7 +530,6 @@ impl Miner {
         let tx_total = transactions.len();
         let mut invalid_tx_users = HashSet::new();
 
-        let immune_users = self.immune_users.read();
         for tx in transactions {
             let signer_public = tx.signer_public();
             let signer_address = public_to_address(&signer_public);
@@ -563,6 +562,7 @@ impl Miner {
                     match e {
                         Error::Runtime(RuntimeError::AssetSupplyOverflow)
                         | Error::Runtime(RuntimeError::InvalidScript) => {
+                            let immune_users = self.immune_users.read();
                             if !self
                                 .mem_pool
                                 .read()

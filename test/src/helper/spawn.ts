@@ -232,7 +232,7 @@ export default class CodeChain {
             this.restarts++;
             this.process = { state: "initializing" };
             const child = spawn(
-                `target/${useDebugBuild ? "debug" : "release"}/codechain`,
+                `target/release/codechain`,
                 [
                     ...baseArgs,
                     "--chain",
@@ -335,7 +335,7 @@ export default class CodeChain {
                             `CodeChain(${self.id}) unexpectedly dumped backtrace`
                         );
                     });
-                    resolve();
+                    resolve(child.pid);
                 }
             }
 
